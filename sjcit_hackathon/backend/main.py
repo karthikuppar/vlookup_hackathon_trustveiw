@@ -139,33 +139,255 @@ def seed_demo_data():
         conn.execute("INSERT OR IGNORE INTO users VALUES ('usr_admin_b', 'Bob Admin', 'admin@betashield.com', ?, 'client_admin', 'tenant_b', ?)", (pwd_hash, now))
         conn.execute("INSERT OR IGNORE INTO users VALUES ('usr_emp_b', 'Betty Employee', 'employee@betashield.com', ?, 'client_employee', 'tenant_b', ?)", (pwd_hash, now))
 
-    # 3. Seed Conflicting SOP Documents (Demo Scenarios 2 & 3)
-    doc_a_text = (
-        "AcroCorp Standard Operating Procedure (SOP):\n\n"
-        "1. Invoicing Policy: All vendor and customer service invoices have a mandatory settlement deadline of 30 days.\n"
-        "Payments issued after 30 days incur standard interest.\n\n"
-        "2. Infrastructure Access: Direct remote vendor access is permitted with written manager sign-off.\n\n"
-        "3. Travel Reimbursements: Standard meal allowance is capped at $75 per day."
-    )
+    # 3. Seed Rich Employee SOP Documents for tenant_a (AcroCorp)
+    # --- Document 1: Employee Onboarding SOP ---
+    doc_onboarding = """ACROCORP EMPLOYEE ONBOARDING STANDARD OPERATING PROCEDURE (SOP-HR-001)
+Version: 1.0 | Effective Date: January 2024 | Owner: Human Resources Department
+
+SECTION 1: PURPOSE
+This document outlines the mandatory onboarding steps every new employee must complete within their first 30 days at AcroCorp Technologies. Following this SOP ensures a smooth transition into your role and compliance with organizational policy.
+
+SECTION 2: DAY ONE — YOUR FIRST STEPS
+Step 1: Report to Reception (Ground Floor, Building A) by 9:00 AM on your joining date. Bring your original ID documents and offer letter.
+Step 2: Collect your employee access badge from the Security Desk. You must wear this badge visibly at all times on company premises.
+Step 3: Proceed to HR to complete your new hire documentation pack. This includes tax forms, bank account details for payroll, emergency contact information, and policy acknowledgement sign-offs.
+Step 4: Your assigned buddy or reporting manager will give you a tour of the office and introduce you to your team.
+Step 5: IT will set up your laptop, email account, and system access. You must complete the IT Security Awareness training on your first day before accessing corporate systems.
+
+SECTION 3: FIRST WEEK CHECKLIST
+- Complete all mandatory e-learning modules on the Learning Portal within 5 business days.
+- Attend the New Employee Orientation session scheduled by HR (check your welcome email for date/time).
+- Set up your AcroCorp email signature using the standard corporate template available on the Intranet.
+- Schedule a 1:1 meeting with your reporting manager to discuss your 30-60-90 day goals.
+- Join your team's Slack channel and introduce yourself.
+- Request access to any project tools or systems you need by raising an IT helpdesk ticket.
+
+SECTION 4: FIRST 30 DAYS
+- Complete the role-specific technical training assigned by your manager.
+- Read and acknowledge the Code of Conduct, Data Protection Policy, and Information Security Policy.
+- Complete the mandatory Health & Safety induction.
+- Probation period: All new employees are on a 3-month probation period. Your manager will schedule a mid-probation review at 6 weeks.
+
+SECTION 5: IMPORTANT CONTACTS
+- HR Helpdesk: hr@acrocorp.com | Ext: 1000
+- IT Helpdesk: it-support@acrocorp.com | Ext: 2000 | Portal: helpdesk.acrocorp.internal
+- Payroll: payroll@acrocorp.com | Ext: 1050
+- Security Desk: security@acrocorp.com | Ext: 3000
+- Facilities (desk, equipment, parking): facilities@acrocorp.com | Ext: 4000
+
+SECTION 6: WHAT TO DO IF YOU HAVE QUESTIONS
+Contact your assigned HR buddy or email hr@acrocorp.com. For urgent issues on Day 1, speak directly with the HR representative at the front desk.
+"""
     DocumentService.ingest_document(
         tenant_id="tenant_a",
         user_id="usr_admin_a",
-        title="AcroCorp Operational Guidelines",
-        filename="acrocorp_sop_v1.txt",
-        content_bytes=doc_a_text.encode("utf-8"),
+        title="Employee Onboarding SOP (HR-001)",
+        filename="acrocorp_onboarding_sop.txt",
+        content_bytes=doc_onboarding.encode("utf-8"),
     )
 
+    # --- Document 2: Leave & Attendance Policy ---
+    doc_leave = """ACROCORP LEAVE AND ATTENDANCE POLICY (POL-HR-002)
+Version: 2.1 | Effective Date: April 2024 | Owner: Human Resources
+
+SECTION 1: LEAVE ENTITLEMENTS
+Annual Leave: All full-time employees are entitled to 24 days of paid annual leave per calendar year, accrued monthly.
+Sick Leave: Employees are entitled to 12 days of paid sick leave per year. A medical certificate is required for absences exceeding 2 consecutive days.
+Casual Leave: 6 days of casual leave per year, non-encashable. Cannot be carried forward.
+Maternity Leave: 26 weeks of paid maternity leave as per statutory requirements.
+Paternity Leave: 5 working days of paid paternity leave to be taken within 30 days of the child's birth.
+Bereavement Leave: 3 days for immediate family members (spouse, children, parents, siblings).
+Public Holidays: Employees observe all government-declared public holidays. A revised list is published on the Intranet each January.
+
+SECTION 2: HOW TO APPLY FOR LEAVE
+Step 1: Log in to the HR Portal at hr.acrocorp.internal.
+Step 2: Navigate to Leave Management > Apply for Leave.
+Step 3: Select leave type, start date, end date, and enter the reason.
+Step 4: Submit the request. Your reporting manager will receive an automatic notification for approval.
+Step 5: You will receive an email confirmation once your manager approves or declines the request.
+For urgent or same-day sick leave: Call or message your manager before 9:30 AM and follow up with an application on the HR Portal.
+
+SECTION 3: LEAVE CARRY-FORWARD RULES
+Annual leave: Maximum of 10 days can be carried forward to the next calendar year. Unused leave beyond 10 days will lapse on December 31st.
+Sick leave: Not encashable, cannot be carried forward. Remaining sick leave lapses at year-end.
+
+SECTION 4: ATTENDANCE GUIDELINES
+Standard work hours are 9:00 AM to 6:00 PM, Monday to Friday.
+Employees must check in using the biometric system or the remote attendance app within 15 minutes of shift start.
+Late arrivals (beyond 9:30 AM) must be notified to the manager. Three unnotified late arrivals in a month may result in a leave deduction.
+Remote Work: Refer to the Remote Work Policy (POL-HR-008) for WFH attendance rules.
+
+SECTION 5: CONTACT
+For leave disputes or adjustments, contact hr@acrocorp.com or ext 1000.
+"""
+    DocumentService.ingest_document(
+        tenant_id="tenant_a",
+        user_id="usr_admin_a",
+        title="Leave & Attendance Policy (HR-002)",
+        filename="acrocorp_leave_policy.txt",
+        content_bytes=doc_leave.encode("utf-8"),
+    )
+
+    # --- Document 3: IT Security & Access Control SOP ---
+    doc_it = """ACROCORP INFORMATION SECURITY & ACCESS CONTROL SOP (SOP-IT-003)
+Version: 3.0 | Effective Date: June 2024 | Owner: Information Technology & Cybersecurity
+
+SECTION 1: PASSWORD POLICY
+All employees must use a strong password meeting these requirements:
+- Minimum 12 characters in length.
+- Must include at least one uppercase letter, one lowercase letter, one number, and one special character.
+- Passwords must be changed every 90 days.
+- Do not reuse any of your last 10 passwords.
+- Never share your password with anyone, including IT staff. AcroCorp IT will NEVER ask for your password.
+- Use the AcroCorp Password Manager (Vault) for storing credentials securely.
+
+SECTION 2: MULTI-FACTOR AUTHENTICATION (MFA)
+MFA is mandatory for all employees accessing corporate systems remotely, including VPN, email, HR Portal, and cloud applications.
+Step 1: Download the AcroCorp Authenticator app from the IT portal.
+Step 2: Register your device by scanning the QR code provided during your IT setup session.
+Step 3: Use the 6-digit one-time code for every remote login.
+
+SECTION 3: DEVICE & LAPTOP POLICY
+Your corporate laptop must not be used for personal activities, including personal email, social media, or installing unauthorized software.
+Do not connect to unsecured public Wi-Fi without using the corporate VPN.
+Lost or stolen devices must be reported to IT within 1 hour of discovery: it-support@acrocorp.com or Ext 2000.
+All devices are enrolled in the Mobile Device Management (MDM) system and can be remotely wiped if lost.
+Do not connect personal USB drives or external storage to corporate devices without prior IT authorization.
+
+SECTION 4: DATA CLASSIFICATION & HANDLING
+Data is classified into three levels:
+- PUBLIC: Can be shared externally (press releases, public documentation).
+- INTERNAL: For employees only. Do not share outside the organization.
+- CONFIDENTIAL: Requires manager approval before sharing. Must be encrypted when stored or transmitted.
+Customer data and PII (Personally Identifiable Information) is always classified as CONFIDENTIAL.
+Do not store confidential data on personal devices, personal cloud storage (Dropbox, Google Drive personal accounts), or email personal mailboxes.
+
+SECTION 5: REPORTING SECURITY INCIDENTS
+If you suspect a security incident (phishing, malware, unauthorized access, data breach):
+Step 1: Do not click any suspicious links or provide credentials.
+Step 2: Immediately report to the IT Security team: security@acrocorp.com or Ext 2999 (24/7).
+Step 3: Do not attempt to fix or investigate the issue yourself.
+Step 4: Preserve all evidence (screenshots, email headers) for IT forensics.
+Step 5: Your manager and the CISO will be notified by IT.
+All security incidents are treated as high priority and must be reported within 30 minutes of discovery.
+
+SECTION 6: INTERNET & EMAIL USAGE
+Corporate internet and email are for business use. Reasonable personal use is permitted but monitored.
+Prohibited uses: Accessing illegal content, downloading pirated software, bulk email marketing, cryptocurrency mining.
+Phishing emails should be forwarded to phishing@acrocorp.com and then deleted.
+"""
+    DocumentService.ingest_document(
+        tenant_id="tenant_a",
+        user_id="usr_admin_a",
+        title="IT Security & Access Control SOP (IT-003)",
+        filename="acrocorp_it_security_sop.txt",
+        content_bytes=doc_it.encode("utf-8"),
+    )
+
+    # --- Document 4: Expense & Reimbursement Policy ---
+    doc_expense = """ACROCORP EXPENSE AND REIMBURSEMENT POLICY (POL-FIN-004)
+Version: 1.5 | Effective Date: March 2024 | Owner: Finance Department
+
+SECTION 1: PURPOSE
+This policy governs how employees submit and receive reimbursement for legitimate business expenses incurred on behalf of AcroCorp Technologies.
+
+SECTION 2: ELIGIBLE EXPENSES
+The following expense categories are reimbursable with proper documentation:
+- Business Travel (flights, trains, taxis/ride-share): Economy class for domestic, business class for international flights over 6 hours.
+- Hotel Accommodation: Up to $150 per night for domestic travel; up to $250 per night for international travel.
+- Meals & Entertainment: Up to $50 per day for domestic travel; up to $75 per day for international travel. Client entertainment requires prior manager approval.
+- Communication: Mobile phone bill reimbursement up to $50/month for employees on the approved field/remote list.
+- Professional Subscriptions: Software or professional memberships must be pre-approved by your manager.
+
+SECTION 3: HOW TO SUBMIT AN EXPENSE CLAIM
+Step 1: Collect all receipts. Receipts are mandatory for all expenses over $10. Credit card statements alone are not accepted.
+Step 2: Log in to the Finance Portal at finance.acrocorp.internal.
+Step 3: Navigate to Expense Claims > New Claim.
+Step 4: Enter expense items, upload receipt images or PDFs, select the relevant project code, and add a description.
+Step 5: Submit for manager approval. Claims must be submitted within 30 days of the expense date.
+Step 6: Approved claims are processed within 7 business days and paid via direct bank transfer.
+
+SECTION 4: NON-REIMBURSABLE EXPENSES
+The following are NOT reimbursable:
+- Fines, parking tickets, or traffic violations.
+- Personal entertainment, alcohol (unless part of approved client entertainment).
+- Expenses for family members or guests not on official company business.
+- Expenses without valid original receipts.
+
+SECTION 5: TRAVEL ADVANCE REQUESTS
+For large business trips, employees may request a travel advance of up to $500 by submitting a Travel Advance Request form to finance@acrocorp.com at least 5 business days before travel.
+Unused advance amounts must be returned to Finance within 5 business days of returning from travel.
+
+SECTION 6: CONTACTS
+Finance queries: finance@acrocorp.com | Ext 5000
+Expense Portal: finance.acrocorp.internal
+"""
+    DocumentService.ingest_document(
+        tenant_id="tenant_a",
+        user_id="usr_admin_a",
+        title="Expense & Reimbursement Policy (FIN-004)",
+        filename="acrocorp_expense_policy.txt",
+        content_bytes=doc_expense.encode("utf-8"),
+    )
+
+    # --- Document 5: Code of Conduct ---
+    doc_conduct = """ACROCORP CODE OF CONDUCT & WORKPLACE ETHICS (POL-HR-005)
+Version: 2.0 | Effective Date: January 2024 | Owner: Compliance & Human Resources
+
+SECTION 1: OUR VALUES
+AcroCorp is built on Integrity, Respect, Innovation, and Accountability. All employees are expected to embody these values in every interaction — internal and external.
+
+SECTION 2: PROFESSIONAL CONDUCT
+- Treat every colleague, client, and partner with courtesy and respect.
+- Discrimination, harassment, or bullying of any kind — based on gender, race, age, religion, disability, or any other protected characteristic — is strictly prohibited and will result in immediate disciplinary action.
+- All business decisions must be made in the best interest of AcroCorp, free from personal bias or conflicts of interest.
+- Conflicts of interest (e.g., working for a competitor, having a financial interest in a supplier) must be disclosed to your manager and HR in writing.
+
+SECTION 3: CONFIDENTIALITY
+Employees must not share proprietary business information, client data, or trade secrets with unauthorized parties, during or after employment.
+This obligation continues for 2 years after your last day of employment.
+Signing the Non-Disclosure Agreement (NDA) is mandatory for all employees and is part of your employment contract.
+
+SECTION 4: SOCIAL MEDIA POLICY
+You may mention your role and employer on personal social media, but must not:
+- Share confidential client information or internal business data.
+- Make disparaging comments about AcroCorp, colleagues, clients, or competitors.
+- Represent your personal opinions as official AcroCorp statements.
+All official communications on behalf of AcroCorp on social media must be approved by the Marketing team.
+
+SECTION 5: GIFTS & ENTERTAINMENT
+Employees must not accept gifts valued above $50 from vendors, clients, or business partners.
+Any gifts of higher value must be reported to your manager and may be donated to charity at company discretion.
+Offering gifts to clients or partners must be pre-approved by your manager and the Finance team.
+
+SECTION 6: REPORTING VIOLATIONS
+If you witness or experience a violation of this Code of Conduct:
+Step 1: Report to your manager or HR if you feel comfortable doing so.
+Step 2: Use the anonymous Ethics Hotline: ethics.acrocorp.internal or call 1-800-ACRO-ETH.
+Step 3: For urgent legal or safety concerns, contact the Compliance Officer directly: compliance@acrocorp.com.
+AcroCorp strictly prohibits retaliation against anyone who reports a concern in good faith.
+"""
+    DocumentService.ingest_document(
+        tenant_id="tenant_a",
+        user_id="usr_admin_a",
+        title="Code of Conduct & Workplace Ethics (HR-005)",
+        filename="acrocorp_code_of_conduct.txt",
+        content_bytes=doc_conduct.encode("utf-8"),
+    )
+
+    # --- Seed BetaShield docs for cross-tenant demo (conflict scenario) ---
     doc_b_text = (
-        "BetaShield Security and Financial Protocol:\n\n"
-        "1. Invoicing Policy: All vendor and customer service invoices have a mandatory settlement deadline of 15 days.\n"
+        "BetaShield Security Protocol (SOP-BS-001):\n\n"
+        "1. Invoicing Policy: All invoices have a mandatory settlement deadline of 15 days. "
         "Under no conditions can payment terms exceed 15 days.\n\n"
-        "2. Infrastructure Access: Direct remote vendor access is strictly forbidden under any circumstances.\n\n"
-        "3. Compliance Audits: Internal audits are conducted quarterly."
+        "2. Remote Access: Direct remote vendor access to infrastructure is strictly forbidden under any circumstances. "
+        "All remote sessions must be mediated by an internal systems engineer.\n\n"
+        "3. Compliance Audits: Internal audits are conducted quarterly by the Compliance team."
     )
     DocumentService.ingest_document(
         tenant_id="tenant_b",
         user_id="usr_admin_b",
-        title="BetaShield Security Standards",
+        title="BetaShield Security Standards (BS-001)",
         filename="betashield_standards_v1.txt",
         content_bytes=doc_b_text.encode("utf-8"),
     )

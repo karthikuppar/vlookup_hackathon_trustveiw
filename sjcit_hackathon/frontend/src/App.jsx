@@ -18,7 +18,36 @@ import {
   Copy,
   ChevronRight,
   Flame,
+  Bot,
 } from 'lucide-react'
+
+// --- Lightweight Markdown Renderer (no external dep) ---
+const renderMarkdown = (text) => {
+  if (!text) return ''
+  let html = text
+    // Escape HTML entities first
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    // Bold **text**
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    // Italic _text_ or *text* (single)
+    .replace(/(?<![*])\*(.+?)\*(?![*])/g, '<em>$1</em>')
+    .replace(/\_(.+?)\_/g, '<em>$1</em>')
+    // Inline code `code`
+    .replace(/`([^`]+)`/g, '<code style="background:rgba(99,102,241,0.18);padding:1px 5px;border-radius:4px;font-family:monospace;font-size:0.88em">$1</code>')
+    // Numbered list lines: "1. text" or "Step 1:"
+    .replace(/^(\d+[\.\)]\s+.+)$/gm, '<div style="margin:3px 0 3px 12px;">&nbsp;&nbsp;$1</div>')
+    // Bullet list lines: "- text"
+    .replace(/^-\s+(.+)$/gm, '<div style="margin:2px 0 2px 8px;">&#8226;&nbsp;$1</div>')
+    // Section headers (ALL CAPS line or line starting with SECTION)
+    .replace(/^(SECTION\s+\d+:.+)$/gm, '<div style="font-weight:700;color:#818cf8;margin-top:10px;margin-bottom:2px;">$1</div>')
+    // Horizontal rules
+    .replace(/^---$/gm, '<hr style="border-color:rgba(255,255,255,0.1);margin:8px 0">')
+    // Double newlines → paragraph break
+    .replace(/\n\n/g, '</p><p style="margin:6px 0">')
+    // Single newlines → line break
+    .replace(/\n/g, '<br/>')
+  return `<p style="margin:0">${html}</p>`
+}
 
 // --- API Helper ---
 const api = async (path, token, options = {}) => {
@@ -265,9 +294,14 @@ function ChatTab({ token, user }) {
           <div key={idx} className={`chat-bubble ${m.role === 'user' ? 'chat-user' : 'chat-bot'}`}>
             {m.role === 'bot' && m.answer_status && (
               <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                {m.answer_status === 'grounded' && (
+                {(m.answer_status === 'grounded') && (
                   <span className="chat-badge badge-grounded">
                     <CheckCircle2 size={12} /> Grounded Answer
+                  </span>
+                )}
+                {m.answer_status === 'conversational' && (
+                  <span className="chat-badge" style={{ background: 'rgba(52,211,153,0.12)', border: '1px solid rgba(52,211,153,0.35)', color: '#6ee7b7' }}>
+                    <Bot size={12} /> AegisKB
                   </span>
                 )}
                 {m.answer_status === 'insufficient_evidence' && (
@@ -288,7 +322,10 @@ function ChatTab({ token, user }) {
               </div>
             )}
 
-            <p style={{ whiteSpace: 'pre-wrap' }}>{m.text}</p>
+            <div
+              className="chat-text-content"
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }}
+            />
 
             {/* Citations Container */}
             {m.citations && m.citations.length > 0 && (
@@ -330,7 +367,7 @@ function ChatTab({ token, user }) {
           className="input-field"
           value={question}
           onChange={e => setQuestion(e.target.value)}
-          placeholder="Ask a question about your tenant's SOPs, invoices, or compliance policies..."
+          placeholder="Ask anything about your company's employee SOPs, policies, or procedures..."
           disabled={loading}
         />
         <button type="submit" className="btn-primary" disabled={loading}>
