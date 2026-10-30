@@ -166,6 +166,14 @@ class DocumentService:
             },
         )
 
+        # Trigger vector index rebuild in memory (Layer 2)
+        if status == "active":
+            try:
+                from vector_store import InMemoryVectorDB
+                InMemoryVectorDB.get_instance().rebuild_tenant(tenant_id)
+            except Exception:
+                pass
+
         return {
             "document_id": doc_id,
             "version_num": version_num,
@@ -249,6 +257,14 @@ class DocumentService:
                 "error": error,
             },
         )
+
+        # Trigger vector index rebuild in memory (Layer 2)
+        if status == "active":
+            try:
+                from vector_store import InMemoryVectorDB
+                InMemoryVectorDB.get_instance().rebuild_tenant(tenant_id)
+            except Exception:
+                pass
 
         return {
             "document_id": doc_id,
