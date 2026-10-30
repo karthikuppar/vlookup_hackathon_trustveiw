@@ -1,5 +1,6 @@
 """Blockchain-lite tamper-evident audit ledger implementation."""
 from __future__ import annotations
+import json
 import uuid
 from typing import Any
 from crypto_utils import canonical_json, hmac_actor, now_utc_iso, sha256_digest
@@ -39,6 +40,9 @@ class AuditLedger:
         payload_digest = f"sha256:{sha256_digest(canonical_json(canonical_payload))}"
 
         with get_connection() as conn:
+            # Take the write lock before reading the chain head, so two concurrent appends cannot both
+            # extend the same entry and fork the chain.
+            conn.execute("BEGIN IMMEDIATE")
             # Fetch previous entry's hash
             last_row = conn.execute(
                 "SELECT sequence, entry_hash FROM audit_events ORDER BY sequence DESC LIMIT 1"
@@ -57,8 +61,8 @@ class AuditLedger:
                 """
                 INSERT INTO audit_events (
                     sequence, event_id, timestamp, event_type, actor_id, tenant_id,
-                    resource_id, action, decision, payload_digest, prev_hash, entry_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    resource_id, action, decision, payload_digest, prev_hash, entry_hash, details_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     next_seq,
@@ -73,6 +77,7 @@ class AuditLedger:
                     payload_digest,
                     prev_hash,
                     entry_hash,
+                    canonical_json(details),
                 ),
             )
 
@@ -92,12 +97,20 @@ class AuditLedger:
         }
 
     @staticmethod
-    def verify() -> dict[str, Any]:
-        """Recompute the entire hash chain and detect any altered, broken, or missing entries."""
-        with get_connection() as conn:
-            rows = conn.execute(
-                "SELECT sequence, event_id, timestamp, event_type, actor_id, tenant_id, resource_id, action, decision, payload_digest, prev_hash, entry_hash FROM audit_events ORDER BY sequence ASC"
-            ).fetchall()
+    def verify(_rows: list[dict[str, Any]] | None = None, _checkpoints: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """Recompute the entire hash chain and detect any altered, broken, or missing entries.
+
+        `_rows` / `_checkpoints` let the tamper simulation verify a modified in-memory COPY; with the defaults
+        this reads (and never modifies, apart from the first baseline checkpoint) the real ledger."""
+        real = _rows is None
+        if real:
+            with get_connection() as conn:
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT sequence, event_id, timestamp, event_type, actor_id, tenant_id, resource_id, action, decision, payload_digest, prev_hash, entry_hash, details_json FROM audit_events ORDER BY sequence ASC"
+                ).fetchall()]
+        else:
+            rows = _rows
+        legacy_unverified = 0
 
         if not rows:
             return {"valid": True, "total_events": 0, "chain_head": GENESIS_PREV_HASH, "message": "Ledger is empty (intact)"}
@@ -147,14 +160,32 @@ class AuditLedger:
                     "actual_hash": row["entry_hash"],
                 }
 
+            # 4. The visible columns must still hash to the digest the chain commits to. Without this an attacker
+            # could change action / decision / actor / tenant and the chain would still verify.
+            if row.get("details_json") is None:
+                legacy_unverified += 1  # written before details were stored; the chain still covers it, the content cannot be re-hashed
+            else:
+                recomputed = f"sha256:{sha256_digest(canonical_json({'action': row['action'], 'actor_id': row['actor_id'], 'decision': row['decision'], 'details': json.loads(row['details_json']), 'event_id': row['event_id'], 'event_type': row['event_type'], 'resource_id': row['resource_id'], 'tenant_id': row['tenant_id'], 'timestamp': row['timestamp']}))}"
+                if recomputed != row["payload_digest"]:
+                    return {
+                        "valid": False,
+                        "tampered_sequence": seq,
+                        "event_id": row["event_id"],
+                        "error_type": "payload_mismatch",
+                        "reason": f"Event content at sequence {seq} no longer matches its committed digest (fields were altered)",
+                    }
+
             expected_prev_hash = row["entry_hash"]
             expected_seq += 1
 
-        # 4. Checkpoint integrity and truncation detection
-        with get_connection() as conn:
-            checkpoints = conn.execute(
-                "SELECT id, timestamp, sequence_head, chain_head_hash, signature FROM ledger_checkpoints ORDER BY sequence_head ASC"
-            ).fetchall()
+        # 5. Checkpoint integrity and truncation detection
+        if _checkpoints is None:
+            with get_connection() as conn:
+                checkpoints = [dict(c) for c in conn.execute(
+                    "SELECT id, timestamp, sequence_head, chain_head_hash, signature FROM ledger_checkpoints ORDER BY sequence_head ASC"
+                ).fetchall()]
+        else:
+            checkpoints = _checkpoints
 
         import hmac as py_hmac
         from crypto_utils import HMAC_KEY
@@ -191,12 +222,13 @@ class AuditLedger:
                 }
 
         # If no checkpoint exists yet and we have events, create the first baseline checkpoint
-        if not checkpoints and len(rows) > 0:
+        if real and not checkpoints and len(rows) > 0:
             AuditLedger.create_checkpoint()
 
         return {
             "valid": True,
             "total_events": len(rows),
+            "legacy_unverified": legacy_unverified,
             "checkpoints_verified": len(checkpoints),
             "chain_head": rows[-1]["entry_hash"],
             "verified_at": now_utc_iso(),
@@ -226,23 +258,34 @@ class AuditLedger:
 
     @staticmethod
     def tamper_for_demo(sequence: int | None = None) -> dict[str, Any]:
-        """Intentionally modify an audit row to demonstrate verifier detecting tampering."""
-        with get_connection() as conn:
-            if sequence is None:
-                row = conn.execute("SELECT sequence FROM audit_events ORDER BY sequence DESC LIMIT 1").fetchone()
-                if not row:
-                    return {"success": False, "message": "No events in ledger to tamper with"}
-                sequence = row["sequence"]
+        """Show the verifier catching tampering WITHOUT touching the real ledger.
 
-            # Tamper the action field without updating the entry_hash or prev_hash
-            conn.execute(
-                "UPDATE audit_events SET payload_digest = 'sha256:0000000000000000000000000000000000000000000000000000000000000000' WHERE sequence = ?",
-                (sequence,),
-            )
+        The rows are copied into memory, one is altered there, and the copy is verified. (An earlier version
+        modified the live table, which let any caller permanently break the audit trail.)"""
+        with get_connection() as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT sequence, event_id, timestamp, event_type, actor_id, tenant_id, resource_id, action, decision, payload_digest, prev_hash, entry_hash, details_json FROM audit_events ORDER BY sequence ASC"
+            ).fetchall()]
+            checkpoints = [dict(c) for c in conn.execute(
+                "SELECT id, timestamp, sequence_head, chain_head_hash, signature FROM ledger_checkpoints ORDER BY sequence_head ASC"
+            ).fetchall()]
+        if not rows:
+            return {"success": False, "simulated": True, "real_ledger_modified": False, "message": "No events in ledger to tamper with"}
+        if sequence is None or not any(r["sequence"] == sequence for r in rows):
+            sequence = rows[-1]["sequence"]
+        for r in rows:
+            if r["sequence"] == sequence:
+                if r.get("details_json") is not None:
+                    r["decision"] = "tampered"  # content edited, digest left alone
+                else:
+                    r["payload_digest"] = "sha256:" + "0" * 64
         return {
             "success": True,
+            "simulated": True,
+            "real_ledger_modified": False,
             "tampered_sequence": sequence,
-            "message": f"Successfully tampered with sequence {sequence}. Run verification to observe detection.",
+            "message": f"Simulated an edit to sequence {sequence} on a copy of the ledger; the real ledger was not changed.",
+            "verification": AuditLedger.verify(_rows=rows, _checkpoints=checkpoints),
         }
 
     @staticmethod

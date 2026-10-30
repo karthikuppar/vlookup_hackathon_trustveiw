@@ -114,7 +114,8 @@ def init_db():
             decision TEXT NOT NULL,
             payload_digest TEXT NOT NULL,
             prev_hash TEXT NOT NULL,
-            entry_hash TEXT NOT NULL
+            entry_hash TEXT NOT NULL,
+            details_json TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_audit_seq ON audit_events(sequence);
 
@@ -307,3 +308,7 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_login_attempts_ident ON login_attempts(identifier, attempted_at);
         """)
+        # Migration: older databases lack the column that lets verify() recompute each payload digest.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(audit_events)").fetchall()}
+        if "details_json" not in cols:
+            conn.execute("ALTER TABLE audit_events ADD COLUMN details_json TEXT")

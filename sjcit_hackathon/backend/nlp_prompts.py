@@ -343,7 +343,7 @@ INTENT_SIGNALS = {
     },
     "prompt_injection_probe": {
         "ignore previous", "disregard instructions", "system prompt", "dan mode",
-        "jailbreak", "reveal secret", "sudo",
+        "jailbreak", "reveal secret",
     },
 }
 

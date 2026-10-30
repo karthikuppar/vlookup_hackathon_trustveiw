@@ -56,9 +56,45 @@ def is_injection(text: str) -> bool:
 
 
 def flag_sentences(sents: list[str]) -> list[bool]:
-    """Per-sentence flags. Also checks adjacent pairs so a phrase broken across a line/sentence boundary is caught."""
+    """Per-sentence flags. Also catches a phrase broken across a boundary, and taints the sentence that follows an injected one."""
     flags = [is_injection(s) for s in sents]
+    orig = list(flags)
     for i in range(len(sents) - 1):
-        if not (flags[i] and flags[i + 1]) and is_injection(sents[i] + " " + sents[i + 1]):
-            flags[i] = flags[i + 1] = True
+        if orig[i]:
+            flags[i + 1] = True  # the sentence right after an injected one is the instruction it introduces
+        elif not orig[i + 1] and is_injection(sents[i] + " " + sents[i + 1]):
+            flags[i] = flags[i + 1] = True  # payload split across the boundary
     return flags
+
+
+_SENTENCE_SPLIT = re.compile(r"(?<![0-9])(?<=[.!?])\s+")
+
+
+def strip_injection(text: str) -> tuple[str, int]:
+    """Remove instruction-like sentences from document text, keeping line structure.
+
+    Returns (clean_text, removed_sentence_count). Applied to document content so that text in an uploaded
+    file can never be quoted back to users as if it were policy."""
+    lines = (text or "").split("\n")
+    items: list[tuple[int, str]] = []
+    for i, line in enumerate(lines):
+        for sent in _SENTENCE_SPLIT.split(line):
+            if sent.strip():
+                items.append((i, sent))
+    flags = flag_sentences([s for _, s in items])
+    # Everything after an injected sentence on the same line is part of the same payload.
+    tainted: set[int] = set()
+    for k, ((line_no, _), bad) in enumerate(zip(items, flags)):
+        if bad:
+            tainted.add(line_no)
+        elif line_no in tainted:
+            flags[k] = True
+    removed = sum(flags)
+    if not removed:
+        return text, 0
+    kept: dict[int, list[str]] = {}
+    for (i, sent), bad in zip(items, flags):
+        if not bad:
+            kept.setdefault(i, []).append(sent)
+    out = [" ".join(kept[i]) if i in kept else "" for i in range(len(lines))]
+    return "\n".join(out).strip(), removed

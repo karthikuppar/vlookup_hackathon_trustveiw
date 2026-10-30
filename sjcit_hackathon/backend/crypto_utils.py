@@ -4,10 +4,38 @@ import hashlib
 import hmac
 import json
 import os
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
-HMAC_KEY = os.getenv("PS04_AUDIT_HMAC_KEY", "ps04_secure_audit_secret_key_default").encode("utf-8")
+def _load_audit_key() -> bytes:
+    """Audit-signing key from the environment, else a random per-install key kept in a local file.
+
+    There is no built-in default: a published key would let anyone forge ledger checkpoints.
+    NOTE: a database whose checkpoints were signed with the old default key will report
+    checkpoint_signature_invalid; recreate it (or re-checkpoint) after upgrading."""
+    env = os.getenv("PS04_AUDIT_HMAC_KEY") or os.getenv("VICO_AUDIT_HMAC_KEY")
+    if env and env.strip():
+        return env.strip().encode("utf-8")
+    key_file = Path(__file__).resolve().parent / ".audit_hmac_key"
+    try:
+        if key_file.exists():
+            stored = key_file.read_text("utf-8").strip()
+            if len(stored) >= 32:
+                return stored.encode("utf-8")
+    except OSError:
+        pass
+    import secrets
+    new_key = secrets.token_hex(32)
+    try:
+        key_file.write_text(new_key, "utf-8")
+    except OSError:
+        if os.getenv("AEGIS_ENV", "").lower() == "production":
+            raise RuntimeError("PS04_AUDIT_HMAC_KEY must be set (cannot persist a generated audit key)")
+    return new_key.encode("utf-8")
+
+
+HMAC_KEY = _load_audit_key()
 
 
 def now_utc_iso() -> str:
