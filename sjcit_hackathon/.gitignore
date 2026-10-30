@@ -1,0 +1,93 @@
+# Node / Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+.cache/
+coverage/
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+yarn-error.log*
+pnpm-debug.log*
+
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.server-venv/
+.extractor-venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+pip-wheel-metadata/
+
+# Environment / Secrets
+.env
+.env.*
+!.env.example
+.secret
+.credentials
+
+# Local Data and Documents
+dataset/
+*.pdf
+backend/generated/
+!backend/generated/.gitkeep
+
+# Model / Checkpoint Binaries
+*.bin
+*.ckpt
+*.gguf
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.model
+*.weights
+
+# Editor / IDE
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+.history/
+.ipynb_checkpoints/
+
+# OS / System
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# App-specific generated / temp
+frontend/dev-dist/
+backend/scratch/
+backend/service_images/
+backend/qdrant_storage/
+backend/vector_store/
+
