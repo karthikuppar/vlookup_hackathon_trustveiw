@@ -23,6 +23,7 @@ import {
   ShieldCheck,
   Activity,
 } from 'lucide-react'
+import SecurityCentreSection from './SecurityCentreSection'
 
 // --- Lightweight Markdown Renderer (no external dep) ---
 const renderMarkdown = (text) => {
@@ -974,6 +975,7 @@ function TeeTab({ token, setSuccess, setError }) {
 // TAB 6: ADMIN & SECURITY HUB (Vector DB + Enclave Matrix)
 // ==========================================
 function AdminSecurityTab({ token, user, setSuccess, setError, onSwitchToChat }) {
+  const [subTab, setSubTab] = useState('security_centre')
   const [nlpStats, setNlpStats] = useState(null)
   const [secMatrix, setSecMatrix] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -1087,6 +1089,66 @@ function AdminSecurityTab({ token, user, setSuccess, setError, onSwitchToChat })
           </button>
         </div>
       </div>
+
+      {/* Sub Navigation Bar for Admin Hub */}
+      <div style={{ display: 'flex', gap: '0.65rem', margin: '1rem 0 1.25rem', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '0.85rem', flexWrap: 'wrap' }}>
+        <button
+          className={`btn-secondary ${subTab === 'security_centre' ? 'active' : ''}`}
+          onClick={() => setSubTab('security_centre')}
+          style={{
+            background: subTab === 'security_centre' ? 'rgba(99, 102, 241, 0.2)' : 'rgba(255,255,255,0.02)',
+            borderColor: subTab === 'security_centre' ? '#818cf8' : 'var(--border-subtle)',
+            color: subTab === 'security_centre' ? '#a5b4fc' : '#94a3b8',
+            fontWeight: 700,
+            fontSize: '0.82rem',
+            padding: '0.5rem 0.95rem',
+          }}
+        >
+          🛡️ Vulnerability Assessment & Automated Remediation
+        </button>
+
+        <button
+          className={`btn-secondary ${subTab === 'vector_nlp' ? 'active' : ''}`}
+          onClick={() => setSubTab('vector_nlp')}
+          style={{
+            background: subTab === 'vector_nlp' ? 'rgba(99, 102, 241, 0.2)' : 'rgba(255,255,255,0.02)',
+            borderColor: subTab === 'vector_nlp' ? '#818cf8' : 'var(--border-subtle)',
+            color: subTab === 'vector_nlp' ? '#a5b4fc' : '#94a3b8',
+            fontWeight: 700,
+            fontSize: '0.82rem',
+            padding: '0.5rem 0.95rem',
+          }}
+        >
+          ⚡ Vector NLP & In-Memory Corpus
+        </button>
+
+        <button
+          className={`btn-secondary ${subTab === 'enclave_matrix' ? 'active' : ''}`}
+          onClick={() => setSubTab('enclave_matrix')}
+          style={{
+            background: subTab === 'enclave_matrix' ? 'rgba(99, 102, 241, 0.2)' : 'rgba(255,255,255,0.02)',
+            borderColor: subTab === 'enclave_matrix' ? '#818cf8' : 'var(--border-subtle)',
+            color: subTab === 'enclave_matrix' ? '#a5b4fc' : '#94a3b8',
+            fontWeight: 700,
+            fontSize: '0.82rem',
+            padding: '0.5rem 0.95rem',
+          }}
+        >
+          🔒 TEE Enclave & Platform Controls Matrix
+        </button>
+      </div>
+
+      {subTab === 'security_centre' && (
+        <SecurityCentreSection
+          token={token}
+          user={user}
+          setSuccess={setSuccess}
+          setError={setError}
+        />
+      )}
+
+      {subTab !== 'security_centre' && (
+        <>
 
       {/* KPI Stats Grid */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem', margin: '1.25rem 0' }}>
@@ -1373,6 +1435,9 @@ function AdminSecurityTab({ token, user, setSuccess, setError, onSwitchToChat })
           </tbody>
         </table>
       </div>
+
+        </>
+      )}
 
     </div>
   )
