@@ -245,7 +245,7 @@ class RetrievalEngine:
                 "answer_status": "security_refusal",
                 "answer": (
                     "🛡️ **Security Alert**: Your query triggered AegisKB's prompt injection defense layer. "
-                    "System instructions and tenant isolation boundaries cannot be altered or bypassed."
+                    "System instructions and document security boundaries cannot be altered or bypassed."
                 ),
                 "citations": [],
                 "limitations": "Blocked by PS-04 prompt injection shield.",
@@ -254,34 +254,34 @@ class RetrievalEngine:
                 "intent": intent,
             }
 
-        # 1.3 Permitted Tenant Scoping (Strict server-side enforcement)
+        # 1.3 Permitted Scope (Strict server-side enforcement)
         active_shared_tenants = SharingService.get_active_shared_tenants_for_user(user_tenant_id)
         permitted_tenants = [user_tenant_id] + active_shared_tenants
 
-        # Cross-tenant extraction probe defense
+        # Unauthorized document extraction probe defense
         if intent == "cross_tenant_probe":
-            # If the user asks specifically about unauthorized tenants
+            # If the user asks specifically about unauthorized policies
             unauthorized = [t for t in ["tenant_b", "betashield"] if t not in permitted_tenants]
             if unauthorized:
                 AuditLedger.append_event(
-                    event_type="cross_tenant_access_denied",
+                    event_type="unauthorized_access_denied",
                     actor_id=user_id,
                     tenant_id=user_tenant_id,
                     resource_id=request_id,
-                    action="cross_tenant_probe",
+                    action="restricted_probe",
                     decision="denied",
-                    details={"attempted_scope": unauthorized, "user_tenant": user_tenant_id},
+                    details={"attempted_scope": unauthorized, "user": user_id},
                 )
                 elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
                 return {
                     "request_id": request_id,
                     "answer_status": "insufficient_evidence",
                     "answer": (
-                        "🔒 **Cross-Tenant Boundary Enforced**: You do not have authorization to view documents "
-                        f"outside of your tenant (`{user_tenant_id}`) and actively shared knowledge bases."
+                        "🔒 **Access Boundary Enforced**: You do not have authorization to view unreleased administrative policies "
+                        "or restricted executive records. Only active employee SOPs are accessible."
                     ),
                     "citations": [],
-                    "limitations": "Server-side tenant isolation enforced prior to retrieval.",
+                    "limitations": "Role-based policy access enforced prior to retrieval.",
                     "is_shared_knowledge_used": False,
                     "latency_ms": elapsed_ms,
                     "intent": intent,
