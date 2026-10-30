@@ -3,10 +3,14 @@ from __future__ import annotations
 import hashlib, io, re, uuid
 from pathlib import Path
 
+from .answer import sentences
 from .audit import now
 from .db import tx
+from .guard import flag_sentences
 
 CHUNK_BUDGET = 800
+MAX_PAGES = 300
+MAX_CHUNKS = 3000
 HEADING = re.compile(r"^(#{1,6}\s+.+|\d+(\.\d+)*[.)]?\s+[A-Z].{0,78}|[A-Z][A-Z0-9 ,&/\-]{3,78})$")
 
 
@@ -42,6 +46,8 @@ def extract(data: bytes, ext: str) -> list[tuple[int | None, str]]:
             reader = PdfReader(io.BytesIO(data))
             if reader.is_encrypted:
                 raise ValueError("PDF is encrypted; upload an unprotected copy")
+            if len(reader.pages) > MAX_PAGES:
+                raise ValueError(f"PDF has {len(reader.pages)} pages; the limit is {MAX_PAGES}. Split it into smaller documents")
             pages = [(i + 1, p.extract_text() or "") for i, p in enumerate(reader.pages)]
         except ValueError:
             raise
@@ -129,6 +135,9 @@ def ingest_version(conn, ledger, settings, *, tenant_id, user_id, filename, data
         chunks = chunk(extract(data, ext))
         if not chunks:
             raise ValueError("Document produced no indexable content")
+        if len(chunks) > MAX_CHUNKS:
+            raise ValueError(f"Document is too large to index ({len(chunks)} chunks; the limit is {MAX_CHUNKS}). Split it into smaller documents")
+        flagged = sum(1 for c in chunks if any(flag_sentences(sentences(c["text"]))))
     except ValueError as e:
         with tx(conn):
             conn.execute("UPDATE document_versions SET status='failed', error=? WHERE id=?", (str(e), version_id))
@@ -144,5 +153,6 @@ def ingest_version(conn, ledger, settings, *, tenant_id, user_id, filename, data
             conn.execute("UPDATE document_versions SET is_current=0, superseded_at=?, superseded_by_version=? WHERE id=?", (now(), version_id, prev["id"]))
         conn.execute("UPDATE document_versions SET status='ready', is_current=1 WHERE id=?", (version_id,))
         ledger.append(conn, "document.activate", actor=user_id, tenant_id=tenant_id, document_id=document_id, version_id=version_id,
-                      version_no=n, superseded_version=prev["id"] if prev else None, chunks=len(chunks))
-    return {"document_id": document_id, "version_id": version_id, "version_no": n, "status": "ready", "chunks": len(chunks), "sha256": digest}
+                      version_no=n, superseded_version=prev["id"] if prev else None, chunks=len(chunks), injection_flagged_chunks=flagged)
+    return {"document_id": document_id, "version_id": version_id, "version_no": n, "status": "ready", "chunks": len(chunks), "sha256": digest,
+            "injection_flagged_chunks": flagged}

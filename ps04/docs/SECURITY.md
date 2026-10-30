@@ -168,3 +168,27 @@ Additional tests: sharing (`test_no_access_without_grant_then_access_with_grant`
 `test_login_lockout_and_no_user_enumeration`, `test_conversations_are_private_to_their_user`, `test_no_token_or_bad_token_denied`),
 and ledger content (`test_audit_covers_required_events`, `test_ledger_never_stores_question_text_or_document_text`,
 `test_forged_checkpoint_rejected`, `test_ledger_event_is_atomic_with_action`).
+
+## Hardening review (prompt injection and abuse resistance)
+
+An adversarial pass found and fixed the following. Each has a test in `tests/test_hardening.py` or `tests/test_guard.py`.
+
+| Finding | Fix |
+|---|---|
+| Injection detector evaded by zero-width characters, fullwidth forms, Cyrillic/Greek lookalikes, combining marks, HTML entities, spaced-out letters, `ig-nore`, leetspeak | `app/guard.py` normalises text before matching and tries leet/separator variants |
+| Payload split across a line or sentence boundary slipped past per-sentence checks | Adjacent sentence pairs are also checked |
+| Paraphrases (`pretend`, `from now on`, `do not follow`), chat-template tags (`<\|im_start\|>`, `[INST]`) not covered | Patterns extended; false-positive set kept in `tests/test_guard.py` |
+| Poisoned documents were only detected at question time | Uploads are scanned; admins get `injection_flagged_chunks` in the response and the audit event |
+| Login timing leaked which emails exist (dummy hash cost 1,000 vs 200,000 iterations) | Dummy hash uses the real PBKDF2 cost |
+| Anyone could lock out a victim by failing logins for their email | Lockout is per (account, client address); a wider per-address cap limits password spraying. `X-Forwarded-For` is not trusted |
+| No throttling of chat or uploads | Per-user sliding-window limits (chat 30/min, upload 20/min) |
+| Unbounded PDF page count and chunk count | Caps of 300 pages and 3,000 chunks, reported as ingestion failures |
+| Chat history kept content from shares that were later revoked, expired or whose owner was suspended | Shared-source citations are re-checked on every history read; content is withheld if access is gone |
+| Missing browser hardening headers | `Referrer-Policy`, `X-Frame-Options`, `Permissions-Policy`, COOP/CORP added |
+
+### What this does not do
+- The detector is a signal, not the boundary. Anything it misses still cannot widen scope: access is decided in SQL and route checks, and answers are extractive.
+- A malicious but non-instruction sentence in an authorised document (for example a false policy statement or a phishing link) will still be quoted. Admins are responsible for document content.
+- Encoded payloads (base64, ROT13, other languages) are not decoded.
+- Rate limits are in-memory and per process. Use a gateway for multi-instance deployments.
+- Original uploads are stored unencrypted on disk.

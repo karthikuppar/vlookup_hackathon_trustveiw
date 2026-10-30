@@ -36,3 +36,12 @@ th{color:var(--mute);font-weight:600;font-size:12px;text-transform:uppercase}
 .login{max-width:360px;margin:12vh auto}.login input{width:100%;margin-bottom:10px}
 .banner{background:#fdf0d5;border:1px solid #ecd49a;color:#6b4a0a;border-radius:8px;padding:10px 14px;margin-bottom:12px}
 @media(max-width:720px){.shell{flex-direction:column}.side{width:auto;flex-direction:row;overflow-x:auto}.side .brand{display:none}.sbs{grid-template-columns:1fr}.view{padding:12px}}
+
+.chip{border:1px solid var(--line);background:var(--card);border-radius:99px;padding:4px 12px;cursor:pointer;font-size:12px}
+.chip.on{background:#e8ecf5;font-weight:600}
+.chip.alert{border-color:var(--bad);color:var(--bad)}
+.badge.ev-security{background:#fbdcdc;color:var(--bad)}
+.badge.ev-sharing{background:#fdf0d5;color:var(--warn)}
+.badge.ev-documents,.badge.ev-questions{background:#d9f2e3;color:var(--ok)}
+details summary{cursor:pointer;color:var(--mute);font-size:12px}
+input[type=search]{min-width:260px}
