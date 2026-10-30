@@ -133,7 +133,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def deny(conn, user, what, tid=None):
         with tx(conn):
-            ledger.append(conn, "access.denied", actor=user["id"], resource=what, attempted_tenant=tid)
+            # counterparty = the tenant that was targeted, so its administrators can see probing against it
+            ledger.append(conn, "access.denied", actor=user["id"], counterparty=tid, resource=what, attempted_tenant=tid)
         raise HTTPException(404, "Not found")
 
     def role_in(conn, user, tid) -> str | None:
