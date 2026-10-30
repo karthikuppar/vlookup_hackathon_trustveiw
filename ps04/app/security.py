@@ -18,10 +18,6 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
-# Used to keep login timing similar for unknown emails.
-DUMMY_HASH = hash_password("dummy-password", 1000)
-
-
 def _b64(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).decode().rstrip("=")
 
