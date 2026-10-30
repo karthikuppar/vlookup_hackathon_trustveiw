@@ -59,8 +59,121 @@ SPELLING_CORRECTIONS: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# 2. Truncated / Half-Cut Query Completion Templates
+# 1.1 Negation Preservation Constants (Section 4.2: Never strip or reverse negations)
 # ---------------------------------------------------------------------------
+NEGATION_WORDS: set[str] = {
+    "not", "no", "never", "without", "except", "prohibited", "forbidden",
+    "disallowed", "cannot", "cant", "can't", "dont", "don't", "wont", "won't",
+}
+
+# ---------------------------------------------------------------------------
+# 1.2 Slang & Abbreviation Lexicon (Section 4.3: Configurable local lexicon)
+# ---------------------------------------------------------------------------
+SLANG_AND_ABBREVIATIONS: dict[str, str] = {
+    # Conversational slang & contractions
+    "cant": "cannot",
+    "can't": "cannot",
+    "wont": "will not",
+    "won't": "will not",
+    "dont": "do not",
+    "don't": "do not",
+    "didnt": "did not",
+    "didn't": "did not",
+    "wanna": "want to",
+    "gonna": "going to",
+    "gotta": "got to",
+    "howd": "how do",
+    "hows": "how is",
+    "whats": "what is",
+    "wheres": "where is",
+    # IT & credentials
+    "pwd": "password",
+    "passwd": "password",
+    "pwds": "passwords",
+    "cred": "credential",
+    "creds": "credentials",
+    "mfa": "mfa multi factor authentication",
+    "2fa": "2fa two factor authentication",
+    "vpn": "vpn virtual private network",
+    "wifi": "wifi network",
+    "net": "network",
+    "comp": "computer",
+    "pc": "laptop computer",
+    "sys": "system",
+    # HR & Leave
+    "pto": "paid time off annual leave",
+    "vaca": "vacation leave",
+    "vacay": "vacation leave",
+    "wfh": "remote work from home",
+    "remot": "remote work",
+    "sk": "sick leave",
+    "med": "medical certificate",
+    "cert": "certificate",
+    "doc": "document",
+    "docs": "documents",
+    "hr": "human resources",
+    "prob": "probation",
+    # Finance & Expenses
+    "exp": "expense",
+    "expns": "expense",
+    "exps": "expenses",
+    "reimb": "reimbursement",
+    "reimbs": "reimbursements",
+    "recpt": "receipt",
+    "rcpt": "receipt",
+    "rcpts": "receipts",
+    "inv": "invoice",
+    "invs": "invoices",
+    "mgr": "manager",
+    "asap": "as soon as possible",
+    "res": "reset",
+    "subm": "submission",
+    "req": "requirement",
+    "reqs": "requirements",
+    "attn": "attendance",
+}
+
+# ---------------------------------------------------------------------------
+# 1.3 Precomputed Canonical Domain Vocabulary (Section 4.4: Incomplete-word recovery)
+# ---------------------------------------------------------------------------
+CANONICAL_DOMAIN_VOCABULARY: set[str] = {
+    "password", "passwords", "authentication", "authenticator", "credential", "credentials",
+    "reimbursement", "reimbursements", "expense", "expenses", "allowance", "per diem",
+    "onboarding", "orientation", "probation", "reception", "manager", "supervisor",
+    "attendance", "biometric", "vacation", "annual", "casual", "bereavement", "maternity", "paternity",
+    "confidential", "confidentiality", "harassment", "discrimination", "whistleblower", "disciplinary",
+    "compliance", "invoicing", "settlement", "vendor", "infrastructure", "audit", "audits",
+    "incident", "phishing", "malware", "laptop", "device", "mobile", "remote",
+}
+
+
+def resolve_incomplete_token(token: str) -> str:
+    """
+    Recovers incomplete words, typos, and abbreviations from local domain resources.
+    Preserves negations, numbers, and technical identifiers.
+    """
+    t_clean = token.lower()
+
+    # 1. Preserve negations explicitly
+    if t_clean in NEGATION_WORDS:
+        return t_clean
+
+    # 2. Check slang and abbreviations
+    if t_clean in SLANG_AND_ABBREVIATIONS:
+        return SLANG_AND_ABBREVIATIONS[t_clean]
+
+    # 3. Check known spelling corrections
+    if t_clean in SPELLING_CORRECTIONS:
+        return SPELLING_CORRECTIONS[t_clean]
+
+    # 4. Incomplete word prefix recovery (Section 4.4)
+    if len(t_clean) >= 4 and t_clean not in CANONICAL_DOMAIN_VOCABULARY:
+        matching_prefixes = [v for v in CANONICAL_DOMAIN_VOCABULARY if v.startswith(t_clean)]
+        if len(matching_prefixes) == 1:
+            return matching_prefixes[0]
+
+    return t_clean
+
 HALF_CUT_EXPANSIONS: dict[str, str] = {
     # Password / IT
     "passw": "password requirements minimum 12 characters length complexity uppercase special change every 90 days",
@@ -202,8 +315,9 @@ INTENT_SIGNALS = {
         "what are my steps", "where do i start", "where to start", "what next",
     },
     "it_security": {
-        "password", "mfa", "2fa", "laptop", "device", "incident", "breach",
+        "password", "passwords", "pwd", "pwds", "mfa", "2fa", "laptop", "device", "incident", "breach",
         "phishing", "wifi", "vpn", "antivirus", "authenticator", "security", "credentials",
+        "confidential", "confid", "data handling", "data", "access",
     },
     "hr_policy": {
         "leave", "vacation", "pto", "sick", "holiday", "attendance", "hours",
@@ -211,11 +325,16 @@ INTENT_SIGNALS = {
     },
     "finance": {
         "expense", "reimbursement", "meal", "food", "hotel", "travel", "flight",
-        "per diem", "receipt", "claim", "allowance", "budget",
+        "per diem", "receipt", "claim", "allowance", "budget", "invoice", "invoices",
     },
     "conduct_ethics": {
-        "conduct", "ethics", "harassment", "gift", "whistleblower", "discrimination",
+        "conduct", "ethics", "harassment", "gift", "gifts", "whistleblower", "discrimination",
         "confidential", "pii", "nda", "conflict of interest",
+    },
+    "operations": {
+        "operational guidelines", "operational", "vendor", "vendor access", "infrastructure",
+        "compliance audit", "audit", "audits", "settlement", "settlement deadline",
+        "invoice", "invoices", "invoicing", "deadline",
     },
     "cross_tenant_probe": {
         "tenant_b", "betashield", "other company", "other tenant", "competitor",
@@ -244,24 +363,61 @@ def load_dynamic_intent_prompts() -> None:
 
 def normalize_query_text(query: str) -> str:
     """
-    Cleans raw query, corrects known typos, checks dynamic learned prompts,
-    and performs truncated prompt expansion.
+    Cleans raw query, handles contractions/slang/abbreviations,
+    recovers incomplete words, and performs truncated prompt expansion.
+    Preserves negations, numbers, and procedural identifiers.
     """
-    clean = re.sub(r"[^\w\s\-\.]", " ", query.lower()).strip()
-    words = clean.split()
-    corrected_words = [SPELLING_CORRECTIONS.get(w, w) for w in words]
-    normalized = " ".join(corrected_words)
+    if not query:
+        return ""
+
+    q_lower = query.lower().strip()
+
+    # Pre-clean common contractions
+    contraction_map = {
+        "can't": "cannot",
+        "won't": "will not",
+        "don't": "do not",
+        "didn't": "did not",
+        "where's": "where is",
+        "what's": "what is",
+        "how's": "how is",
+        "how'd": "how do",
+        "it's": "it is",
+        "that's": "that is",
+    }
+    for contr, repl in contraction_map.items():
+        q_lower = re.sub(r"\b" + re.escape(contr) + r"\b", repl, q_lower)
 
     # 1. Check dynamically learned prompts first (auto-trained from previous queries)
+    if q_lower in DYNAMIC_LEARNED_PROMPTS:
+        _, expansion = DYNAMIC_LEARNED_PROMPTS[q_lower]
+        return f"{q_lower} {expansion}"
+
+    # 2. Direct half-cut expansion match on raw lower query
+    if q_lower in HALF_CUT_EXPANSIONS:
+        return HALF_CUT_EXPANSIONS[q_lower]
+
+    # Clean characters while preserving hyphens, dots, and words
+    clean = re.sub(r"[^\w\s\-\.]", " ", q_lower).strip()
+    words = clean.split()
+
+    # Resolve each token via resolve_incomplete_token
+    resolved_parts: list[str] = []
+    for w in words:
+        resolved = resolve_incomplete_token(w)
+        resolved_parts.extend(resolved.split())
+
+    normalized = " ".join(resolved_parts)
+
+    # Re-check expansions on normalized string
     if normalized in DYNAMIC_LEARNED_PROMPTS:
         _, expansion = DYNAMIC_LEARNED_PROMPTS[normalized]
         return f"{normalized} {expansion}"
 
-    # 2. Direct half-cut expansion match
     if normalized in HALF_CUT_EXPANSIONS:
         return HALF_CUT_EXPANSIONS[normalized]
 
-    # 3. Prefix or partial phrase match
+    # Prefix or partial phrase match
     for trigger, expansion in HALF_CUT_EXPANSIONS.items():
         if normalized == trigger or normalized.startswith(f"{trigger} ") or normalized.endswith(f" {trigger}"):
             if len(words) <= 4:
@@ -270,62 +426,95 @@ def normalize_query_text(query: str) -> str:
     return normalized
 
 
-def classify_user_intent(query: str) -> str:
+def classify_user_intent_with_confidence(query: str) -> tuple[str, float, bool, list[str]]:
     """
-    Rule-based intent classifier with dynamic learning overlay.
+    Calibrated intent classifier with ambiguity detection and confidence scoring.
+    Returns:
+        (primary_intent, confidence, is_ambiguous, candidate_intents)
+    Fulfills Sections 4.5 & 4.6 of Technical Specification.
     """
+    if not query:
+        return "knowledge", 0.0, False, ["knowledge"]
+
     q_lower = query.lower().strip()
 
-    # Dynamic learned intent lookup
+    # 1. Dynamic learned intent lookup (highest precedence)
     if q_lower in DYNAMIC_LEARNED_PROMPTS:
-        return DYNAMIC_LEARNED_PROMPTS[q_lower][0]
+        target_intent = DYNAMIC_LEARNED_PROMPTS[q_lower][0]
+        return target_intent, 0.99, False, [target_intent]
 
-    # Exact greeting match
-    for sig in INTENT_SIGNALS["greeting"]:
-        if q_lower == sig or q_lower.startswith(f"{sig} ") or q_lower.endswith(f" {sig}"):
-            return "greeting"
-
-    # Help match
-    for sig in INTENT_SIGNALS["help"]:
-        if sig in q_lower:
-            return "help"
-
-    # Security injection probe
+    # 2. Security Injection Probes (Hard Gate, 100% confidence)
     for sig in INTENT_SIGNALS["prompt_injection_probe"]:
         if sig in q_lower:
-            return "prompt_injection_probe"
+            return "prompt_injection_probe", 1.0, False, ["prompt_injection_probe"]
 
-    # Cross-tenant extraction probe
+    # 3. Cross-Tenant Extraction Probes (Hard Gate, 100% confidence)
     for sig in INTENT_SIGNALS["cross_tenant_probe"]:
         if sig in q_lower:
-            return "cross_tenant_probe"
+            return "cross_tenant_probe", 1.0, False, ["cross_tenant_probe"]
 
-    # Onboarding
-    for sig in INTENT_SIGNALS["onboarding"]:
+    # 4. Conversational Greetings
+    for sig in INTENT_SIGNALS["greeting"]:
+        if q_lower == sig or q_lower.startswith(f"{sig} ") or q_lower.endswith(f" {sig}"):
+            return "greeting", 0.98, False, ["greeting"]
+
+    # 5. Help / Capability queries
+    for sig in INTENT_SIGNALS["help"]:
         if sig in q_lower:
-            return "onboarding"
+            return "help", 0.95, False, ["help"]
 
-    # IT Security
-    for sig in INTENT_SIGNALS["it_security"]:
-        if sig in q_lower:
-            return "it_security"
+    # 6. Domain Scoring & Disambiguation
+    # Evaluate raw query + normalized tokens
+    q_norm = normalize_query_text(query).lower()
+    raw_tokens = set(re.findall(r"\w+", q_lower))
+    norm_tokens = set(re.findall(r"\w+", q_norm))
+    all_tokens = raw_tokens | norm_tokens
 
-    # HR Policy
-    for sig in INTENT_SIGNALS["hr_policy"]:
-        if sig in q_lower:
-            return "hr_policy"
+    domain_intents = ["onboarding", "it_security", "hr_policy", "finance", "conduct_ethics", "operations"]
+    scores: dict[str, float] = {di: 0.0 for di in domain_intents}
 
-    # Finance
-    for sig in INTENT_SIGNALS["finance"]:
-        if sig in q_lower:
-            return "finance"
+    for di in domain_intents:
+        signals = INTENT_SIGNALS.get(di, set())
+        for sig in signals:
+            sig_lower = sig.lower()
+            if " " in sig_lower:
+                if sig_lower == q_lower or sig_lower == q_norm:
+                    scores[di] += 5.0
+                elif sig_lower in q_lower:
+                    scores[di] += 3.5
+                elif sig_lower in q_norm:
+                    scores[di] += 2.5
+            else:
+                if sig_lower in all_tokens:
+                    scores[di] += 1.8
 
-    # Ethics
-    for sig in INTENT_SIGNALS["conduct_ethics"]:
-        if sig in q_lower:
-            return "conduct_ethics"
+    # Rank candidate intents
+    ranked = sorted([(sc, di) for di, sc in scores.items() if sc > 0], reverse=True)
 
-    return "knowledge"
+    if not ranked:
+        return "knowledge", 0.40, False, ["knowledge"]
+
+    top_score, top_intent = ranked[0]
+
+    # Calculate calibrated confidence
+    confidence = min(0.99, max(0.50, round(top_score / (top_score + 1.2), 3)))
+
+    # Ambiguity detection: check if second-place intent is within tight margin
+    is_ambiguous = False
+    candidate_intents = [top_intent]
+
+    if len(ranked) > 1:
+        second_score, second_intent = ranked[1]
+        if (top_score - second_score) <= 0.8 and second_score >= 1.5:
+            is_ambiguous = True
+            candidate_intents = [di for sc, di in ranked if sc >= top_score - 1.0]
+
+    return top_intent, confidence, is_ambiguous, candidate_intents
+
+
+def classify_user_intent(query: str) -> str:
+    """Compatibility wrapper returning the primary intent."""
+    return classify_user_intent_with_confidence(query)[0]
 
 
 def enrich_tokens_with_intent_and_synonyms(tokens: list[str], intent: str) -> list[str]:

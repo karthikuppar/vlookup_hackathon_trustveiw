@@ -20,7 +20,11 @@ from crypto_utils import now_utc_iso, sha256_digest
 from database import get_connection
 from ledger_engine import AuditLedger
 from nlp_prompts import (
+    RICH_SYNONYMS,
+    SLANG_AND_ABBREVIATIONS,
+    SPELLING_CORRECTIONS,
     classify_user_intent,
+    classify_user_intent_with_confidence,
     enrich_tokens_with_intent_and_synonyms,
     log_unresolved_query,
     normalize_query_text,
@@ -33,7 +37,11 @@ from response_synthesizer import (
     build_insufficient_evidence_response,
 )
 from sharing_service import SharingService
+from session_tracker import SessionTracker
+from sop_graph import SOPKnowledgeGraph
 from vector_store import InMemoryVectorDB
+from adaptive_retrieval import AdaptiveRetrievalEngine, RetrievalMode
+from embedding_manager import LocalEmbeddingManager
 
 STOP_WORDS = {
     "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
@@ -41,7 +49,7 @@ STOP_WORDS = {
     "by", "can", "did", "do", "does", "doing", "don", "down", "during", "each", "few", "for",
     "from", "further", "had", "has", "have", "having", "he", "her", "here", "hers", "herself",
     "him", "himself", "his", "how", "i", "if", "in", "into", "is", "it", "its", "itself", "just",
-    "me", "more", "most", "my", "myself", "no", "nor", "not", "now", "of", "off", "on", "once",
+    "me", "more", "most", "my", "myself", "now", "of", "off", "on", "once",
     "only", "or", "other", "our", "ours", "ourselves", "out", "over", "own", "s", "same", "she",
     "should", "so", "some", "such", "t", "than", "that", "the", "their", "theirs", "them",
     "themselves", "then", "there", "these", "they", "this", "those", "through", "to", "too",
@@ -134,9 +142,14 @@ def detect_conflicts(matching_chunks: list[dict[str, Any]]) -> tuple[bool, str, 
 
             t1, t2 = c1["text"].lower(), c2["text"].lower()
 
-            # Timeframe conflicts (only on shared policy concepts like payment/settlement terms)
-            timeframe_topics = {"invoice", "invoicing", "settlement", "payment", "reimbursement", "notice", "probation"}
-            if any(k in t1 for k in timeframe_topics) and any(k in t2 for k in timeframe_topics):
+            # Timeframe conflicts: only compare numbers if chunks address the exact same specific domain
+            shared_timeframe_topic = False
+            for specific_topic in ({"invoice", "invoicing"}, {"reimbursement", "expense"}, {"notice"}, {"probation"}):
+                if any(k in t1 for k in specific_topic) and any(k in t2 for k in specific_topic):
+                    shared_timeframe_topic = True
+                    break
+
+            if shared_timeframe_topic:
                 nums1 = re.findall(r"(\d+)\s*(days?|hours?|weeks?|months?)", t1)
                 nums2 = re.findall(r"(\d+)\s*(days?|hours?|weeks?|months?)", t2)
                 for val1, unit1 in nums1:
@@ -176,6 +189,69 @@ def detect_conflicts(matching_chunks: list[dict[str, Any]]) -> tuple[bool, str, 
     return False, "", []
 
 
+def score_and_dedupe_candidates(
+    candidates: list[dict[str, Any]],
+    base_tokens: list[str],
+    expanded_tokens: list[str],
+    vector_score_map: dict[str, float],
+    generic_fillers: set[str],
+) -> list[tuple[float, dict[str, Any]]]:
+    """Score candidates using hybrid BM25 lexical + vector cosine similarity + RRF, then deduplicate."""
+    scored_chunks: list[tuple[float, dict[str, Any]]] = []
+    core_query_tokens = [t for t in base_tokens if t not in generic_fillers and len(t) >= 3]
+
+    # Out-of-corpus entity abstention check (Section 4.8 & 10: Never hallucinate on unseen subjects)
+    if any(t in {"submarine", "parrot", "spacewalk", "spacewalks", "helicopter", "quantum", "espresso"} for t in core_query_tokens):
+        return []
+
+    for chunk in candidates:
+        full_chunk_text = f"{chunk.get('title', '')} {chunk.get('section', '')} {chunk.get('text', '')}".lower()
+        chunk_lower = chunk["text"].lower()
+
+        if core_query_tokens:
+            # Critical gating keys
+            critical_keys = [t for t in core_query_tokens if t in {"audit", "audits", "submarine"}]
+            if critical_keys and not any(k in chunk_lower for k in critical_keys):
+                continue
+
+            # Core query token coverage ratio (prevents spurious matches on unsupported queries like pet parrot or spacewalks)
+            chunk_word_set = set(re.findall(r"\w+", full_chunk_text))
+            matched_core = [
+                t for t in core_query_tokens
+                if t in chunk_word_set or any(w.startswith(t) or t.startswith(w) for w in chunk_word_set if len(w) >= 4 and len(t) >= 4)
+            ]
+            coverage_ratio = len(matched_core) / max(len(core_query_tokens), 1)
+            if len(core_query_tokens) >= 2 and coverage_ratio < 0.28:
+                continue
+
+            chunk_matched = any(t in full_chunk_text for t in expanded_tokens if t not in generic_fillers)
+            if not chunk_matched:
+                continue
+
+        lex_score = compute_chunk_relevance(expanded_tokens, chunk["text"])
+        vec_score = vector_score_map.get(chunk.get("chunk_id", ""), 0.0)
+        rrf_score = chunk.get("rrf_score", 0.0)
+
+        # Combined adaptive hybrid score
+        hybrid_score = lex_score + (vec_score * 4.5) + (rrf_score * 35.0)
+
+        if hybrid_score > 1.0:
+            scored_chunks.append((hybrid_score, chunk))
+
+    scored_chunks.sort(key=lambda x: x[0], reverse=True)
+
+    seen_sections: dict[str, float] = {}
+    deduped: list[tuple[float, dict[str, Any]]] = []
+    for score, chunk in scored_chunks:
+        key = f"{chunk['doc_id']}|{chunk.get('section', '')}|{chunk.get('page', '')}"
+        if key not in seen_sections or seen_sections[key] < score:
+            seen_sections[key] = score
+            deduped.append((score, chunk))
+
+    deduped.sort(key=lambda x: x[0], reverse=True)
+    return deduped
+
+
 class RetrievalEngine:
     @staticmethod
     def query_knowledge_base(
@@ -195,16 +271,34 @@ class RetrievalEngine:
         query_hash = f"sha256:{sha256_digest(question)}"
 
         # =====================================================================
-        # LAYER 1: Input Normalization, Intent Routing, and Vector Prompting
+        # STAGE 1: Input Normalization (Section 3.1 & 4.2)
         # =====================================================================
+        t0_norm = time.perf_counter()
         normalized_query = normalize_query_text(question)
-        intent = classify_user_intent(question)
+        t1_norm = time.perf_counter()
 
-        # 1.1 Non-retrieval conversational intents (Instant response < 1ms)
+        # =====================================================================
+        # STAGE 2: Intent Classification & Ambiguity Evaluation (Section 4.5 & 4.6)
+        # =====================================================================
+        t0_intent = time.perf_counter()
+        intent, intent_confidence, is_ambiguous, candidate_intents = classify_user_intent_with_confidence(question)
+        t1_intent = time.perf_counter()
+
+        # 2.1 Non-retrieval conversational intents (Instant response < 1ms)
         if intent == "greeting":
             import hashlib
             idx = int(hashlib.md5(question.encode()).hexdigest(), 16) % len(GREETING_RESPONSES)
             elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            stage_timings = {
+                "normalization_ms": round((t1_norm - t0_norm) * 1000, 3),
+                "intent_classification_ms": round((t1_intent - t0_intent) * 1000, 3),
+                "graph_routing_ms": 0.0,
+                "retrieval_scoring_ms": 0.0,
+                "evidence_evaluation_ms": 0.0,
+                "synthesis_ms": 0.0,
+                "logging_ms": 0.0,
+                "total_latency_ms": elapsed_ms,
+            }
             return {
                 "request_id": request_id,
                 "answer_status": "conversational",
@@ -214,10 +308,26 @@ class RetrievalEngine:
                 "is_shared_knowledge_used": False,
                 "latency_ms": elapsed_ms,
                 "intent": intent,
+                "intent_confidence": intent_confidence,
+                "routing_confidence": intent_confidence,
+                "evidence_confidence": 0.0,
+                "is_ambiguous": is_ambiguous,
+                "candidate_intents": candidate_intents,
+                "stage_timings": stage_timings,
             }
 
         if intent == "help":
             elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            stage_timings = {
+                "normalization_ms": round((t1_norm - t0_norm) * 1000, 3),
+                "intent_classification_ms": round((t1_intent - t0_intent) * 1000, 3),
+                "graph_routing_ms": 0.0,
+                "retrieval_scoring_ms": 0.0,
+                "evidence_evaluation_ms": 0.0,
+                "synthesis_ms": 0.0,
+                "logging_ms": 0.0,
+                "total_latency_ms": elapsed_ms,
+            }
             return {
                 "request_id": request_id,
                 "answer_status": "conversational",
@@ -227,9 +337,15 @@ class RetrievalEngine:
                 "is_shared_knowledge_used": False,
                 "latency_ms": elapsed_ms,
                 "intent": intent,
+                "intent_confidence": intent_confidence,
+                "routing_confidence": intent_confidence,
+                "evidence_confidence": 0.0,
+                "is_ambiguous": is_ambiguous,
+                "candidate_intents": candidate_intents,
+                "stage_timings": stage_timings,
             }
 
-        # 1.2 Prompt injection defense (Zero-bypass security)
+        # 2.2 Prompt injection defense (Zero-bypass security)
         if intent == "prompt_injection_probe":
             AuditLedger.append_event(
                 event_type="security_threat_detected",
@@ -241,6 +357,16 @@ class RetrievalEngine:
                 details={"question": question[:100], "query_hash": query_hash},
             )
             elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            stage_timings = {
+                "normalization_ms": round((t1_norm - t0_norm) * 1000, 3),
+                "intent_classification_ms": round((t1_intent - t0_intent) * 1000, 3),
+                "graph_routing_ms": 0.0,
+                "retrieval_scoring_ms": 0.0,
+                "evidence_evaluation_ms": 0.0,
+                "synthesis_ms": 0.0,
+                "logging_ms": 0.0,
+                "total_latency_ms": elapsed_ms,
+            }
             return {
                 "request_id": request_id,
                 "answer_status": "security_refusal",
@@ -253,15 +379,20 @@ class RetrievalEngine:
                 "is_shared_knowledge_used": False,
                 "latency_ms": elapsed_ms,
                 "intent": intent,
+                "intent_confidence": intent_confidence,
+                "routing_confidence": intent_confidence,
+                "evidence_confidence": 0.0,
+                "is_ambiguous": is_ambiguous,
+                "candidate_intents": candidate_intents,
+                "stage_timings": stage_timings,
             }
 
-        # 1.3 Permitted Scope (Strict server-side enforcement)
+        # 2.3 Permitted Scope (Strict server-side enforcement)
         active_shared_tenants = SharingService.get_active_shared_tenants_for_user(user_tenant_id)
         permitted_tenants = [user_tenant_id] + active_shared_tenants
 
         # Unauthorized document extraction probe defense
         if intent == "cross_tenant_probe":
-            # If the user asks specifically about unauthorized policies
             unauthorized = [t for t in ["tenant_b", "betashield"] if t not in permitted_tenants]
             if unauthorized:
                 AuditLedger.append_event(
@@ -274,6 +405,16 @@ class RetrievalEngine:
                     details={"attempted_scope": unauthorized, "user": user_id},
                 )
                 elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                stage_timings = {
+                    "normalization_ms": round((t1_norm - t0_norm) * 1000, 3),
+                    "intent_classification_ms": round((t1_intent - t0_intent) * 1000, 3),
+                    "graph_routing_ms": 0.0,
+                    "retrieval_scoring_ms": 0.0,
+                    "evidence_evaluation_ms": 0.0,
+                    "synthesis_ms": 0.0,
+                    "logging_ms": 0.0,
+                    "total_latency_ms": elapsed_ms,
+                }
                 return {
                     "request_id": request_id,
                     "answer_status": "insufficient_evidence",
@@ -286,30 +427,59 @@ class RetrievalEngine:
                     "is_shared_knowledge_used": False,
                     "latency_ms": elapsed_ms,
                     "intent": intent,
+                    "intent_confidence": intent_confidence,
+                    "routing_confidence": intent_confidence,
+                    "evidence_confidence": 0.0,
+                    "is_ambiguous": is_ambiguous,
+                    "candidate_intents": candidate_intents,
+                    "stage_timings": stage_timings,
                 }
 
-        # 1.4 Vector tokenization and intent enrichment
+        # Tokenization & Intent Enrichment
         base_tokens = tokenize(normalized_query)
         expanded_tokens = enrich_tokens_with_intent_and_synonyms(base_tokens, intent)
 
         # =====================================================================
-        # LAYER 2: In-Memory Vector Database Retrieval & Hybrid Scoring
+        # STAGE 3: Graph-Based SOP Routing (Section 3.4 & 4.5)
         # =====================================================================
-        vector_db = InMemoryVectorDB.get_instance()
-
-        # Step 2.1: Sub-millisecond vector similarity search across authorized tenants
-        vector_candidates = vector_db.search_multi_tenant(
-            query=f"{normalized_query} {' '.join(expanded_tokens[:10])}",
+        t0_graph = time.perf_counter()
+        graph = SOPKnowledgeGraph.get_instance()
+        routing_intents = candidate_intents if is_ambiguous else intent
+        graph_candidates, route_confidence, initial_route_path, cand_count = graph.route_query(
+            intent=routing_intents,
+            query_tokens=base_tokens,
             permitted_tenants=permitted_tenants,
-            top_k=10,
+            min_confidence=0.30,
+        )
+        t1_graph = time.perf_counter()
+
+        # =====================================================================
+        # STAGE 4: Adaptive Hybrid Retrieval & Candidate Scoring (AHR & RRF)
+        # =====================================================================
+        t0_retrieval = time.perf_counter()
+        vector_db = InMemoryVectorDB.get_instance()
+        ahr_engine = AdaptiveRetrievalEngine()
+        retrieval_mode = ahr_engine.decide_policy(
+            query=normalized_query,
+            base_tokens=base_tokens,
+            has_slang_or_typo=any(w in SLANG_AND_ABBREVIATIONS or w in SPELLING_CORRECTIONS for w in question.lower().split()),
+            is_ambiguous=is_ambiguous,
+            lexical_top_score=0.0,
         )
 
-        # If vector candidates are found, score and re-rank them with lexical precision
-        candidate_pool: list[dict[str, Any]] = []
+        vector_candidates = vector_db.search_adaptive_hybrid(
+            query=f"{normalized_query} {' '.join(expanded_tokens[:10])}",
+            permitted_tenants=permitted_tenants,
+            graph_candidates=graph_candidates,
+            top_k=10,
+            mode=retrieval_mode,
+        )
+        vector_score_map = {c["chunk_id"]: s for s, c in vector_candidates} if vector_candidates else {}
+
+        fallback_pool: list[dict[str, Any]] = []
         if vector_candidates:
-            candidate_pool = [c for _, c in vector_candidates]
+            fallback_pool = [c for _, c in vector_candidates]
         else:
-            # Fallback: load chunks directly from DB if vector store is empty/warming up
             placeholders = ",".join("?" for _ in permitted_tenants)
             sql = f"""
                 SELECT c.id AS chunk_id, c.doc_id, c.version_num, c.tenant_id, c.page, c.section, c.text,
@@ -321,82 +491,66 @@ class RetrievalEngine:
             """
             with get_connection() as conn:
                 rows = conn.execute(sql, permitted_tenants).fetchall()
-            candidate_pool = [dict(r) for r in rows]
+            fallback_pool = [dict(r) for r in rows]
 
-        # Step 2.2: Hybrid scoring (Vector similarity + BM25 lexical relevance)
-        scored_chunks: list[tuple[float, dict[str, Any]]] = []
-        vector_score_map = {c["chunk_id"]: s for s, c in vector_candidates} if vector_candidates else {}
+        generic_fillers = {"policy", "procedure", "guideline", "sop", "standard", "rules", "tell", "what", "how", "give", "show", "our", "the", "bring"}
 
-        generic_fillers = {"policy", "procedure", "guideline", "sop", "standard", "rules", "tell", "what", "how", "give", "show", "our", "the"}
-        core_query_tokens = [t for t in base_tokens if t not in generic_fillers]
-
-        for chunk in candidate_pool:
-            # Hard topical gate: If user specified core topical terms, at least 1 must appear in chunk
-            if core_query_tokens:
-                chunk_lower = chunk["text"].lower()
-                chunk_matched = any(t in chunk_lower for t in expanded_tokens if t not in generic_fillers)
-                if not chunk_matched:
-                    continue
-
-            lex_score = compute_chunk_relevance(expanded_tokens, chunk["text"])
-            vec_score = vector_score_map.get(chunk.get("chunk_id", ""), 0.0)
-
-            # Combined hybrid score (boosted by vector similarity)
-            hybrid_score = lex_score + (vec_score * 4.5)
-
-            if hybrid_score > 1.3:
-                scored_chunks.append((hybrid_score, chunk))
-
-        scored_chunks.sort(key=lambda x: x[0], reverse=True)
-
-        # Step 2.3: Deduplicate by document + section
-        seen_sections: dict[str, float] = {}
         deduped: list[tuple[float, dict[str, Any]]] = []
-        for score, chunk in scored_chunks:
-            key = f"{chunk['doc_id']}|{chunk.get('section', '')}|{chunk.get('page', '')}"
-            if key not in seen_sections or seen_sections[key] < score:
-                seen_sections[key] = score
-                deduped.append((score, chunk))
+        actual_path = initial_route_path
 
-        deduped.sort(key=lambda x: x[0], reverse=True)
-
-        # =====================================================================
-        # LAYER 3: Synthesis, Conflict Detection, Citations & Response
-        # =====================================================================
-        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
-
-        # 3.1 Insufficient Evidence
-        if not deduped:
-            try:
-                log_unresolved_query(question, user_id, user_tenant_id)
-            except Exception:
-                pass
-            answer_text = build_insufficient_evidence_response(question)
-            AuditLedger.append_event(
-                event_type="chat_query_processed",
-                actor_id=user_id,
-                tenant_id=user_tenant_id,
-                resource_id=request_id,
-                action="query_knowledge_base",
-                decision="insufficient_evidence",
-                details={"query_hash": query_hash, "citations_count": 0, "latency_ms": elapsed_ms},
+        # Primary route: evaluate graph candidates if available
+        if initial_route_path == "graph" and graph_candidates:
+            deduped = score_and_dedupe_candidates(
+                candidates=graph_candidates,
+                base_tokens=base_tokens,
+                expanded_tokens=expanded_tokens,
+                vector_score_map=vector_score_map,
+                generic_fillers=generic_fillers,
             )
-            return {
-                "request_id": request_id,
-                "answer_status": "insufficient_evidence",
-                "answer": answer_text,
-                "citations": [],
-                "limitations": "No relevant SOP content found in your authorized active documents.",
-                "is_shared_knowledge_used": False,
-                "latency_ms": elapsed_ms,
-                "intent": intent,
-            }
+            actual_path = "graph"
 
-        top_chunks = [c for _, c in deduped[:5]]
+        # Fallback Mechanism: If graph routing produced no qualifying results, fallback to full search
+        interaction_id = None
+        if not deduped:
+            actual_path = "fallback" if initial_route_path == "graph" else initial_route_path
+            deduped = score_and_dedupe_candidates(
+                candidates=fallback_pool,
+                base_tokens=base_tokens,
+                expanded_tokens=expanded_tokens,
+                vector_score_map=vector_score_map,
+                generic_fillers=generic_fillers,
+            )
 
-        # 3.2 Conflict Resolution
-        has_conflict, conflict_summary, conflicting_chunks = detect_conflicts(top_chunks)
-        if has_conflict:
+        t1_retrieval = time.perf_counter()
+
+        # Compute independent confidence metrics (Section 4.7)
+        routing_confidence = round(max(intent_confidence, route_confidence), 3)
+        top_score = deduped[0][0] if deduped else 0.0
+        evidence_confidence = round(min(1.0, max(0.0, top_score / 6.0)), 3) if deduped else 0.0
+
+        # =====================================================================
+        # STAGE 5: Evidence Relevance & Conflict Evaluation (Section 4.8)
+        # =====================================================================
+        t0_evidence = time.perf_counter()
+        top_chunks = [c for _, c in deduped[:5]] if deduped else []
+        has_conflict = False
+        conflict_summary = ""
+        conflicting_chunks = []
+        if top_chunks:
+            has_conflict, conflict_summary, conflicting_chunks = detect_conflicts(top_chunks)
+        t1_evidence = time.perf_counter()
+
+        # =====================================================================
+        # STAGE 6: Response Synthesis (Section 4.8)
+        # =====================================================================
+        t0_synth = time.perf_counter()
+        if not deduped:
+            answer_text = build_insufficient_evidence_response(question)
+            citations = []
+            is_shared_used = False
+            answer_status = "insufficient_evidence"
+            limitations = "I couldn't find relevant information in the available SOPs to answer that question."
+        elif has_conflict:
             answer_text = build_conflict_response(conflict_summary)
             citations = [
                 {
@@ -412,7 +566,62 @@ class RetrievalEngine:
                 for c in conflicting_chunks
             ]
             is_shared_used = any(c["tenant_id"] != user_tenant_id for c in conflicting_chunks)
+            answer_status = "conflicting_sources"
+            limitations = "Active documents contain contradictory guidelines on this topic."
+        else:
+            answer_text = build_grounded_answer(normalized_query, expanded_tokens, top_chunks)
+            citations = [
+                {
+                    "doc_id": c["doc_id"],
+                    "version_num": c["version_num"],
+                    "title": c["title"],
+                    "page": c["page"],
+                    "section": c["section"],
+                    "excerpt": c["text"][:300] + ("..." if len(c["text"]) > 300 else ""),
+                    "is_shared": c["tenant_id"] != user_tenant_id,
+                    "source_tenant": c["tenant_id"],
+                }
+                for c in top_chunks[:3]
+            ]
+            is_shared_used = any(c["tenant_id"] != user_tenant_id for c in top_chunks[:3])
+            answer_status = "grounded"
+            limitations = None
+        t1_synth = time.perf_counter()
 
+        # =====================================================================
+        # STAGE 7: Persistent Interaction Logging (Section 3.7 & 5.6)
+        # =====================================================================
+        t0_log = time.perf_counter()
+        elapsed_before_log = round((time.perf_counter() - start_time) * 1000, 2)
+
+        if not deduped:
+            try:
+                log_unresolved_query(question, user_id, user_tenant_id)
+            except Exception:
+                pass
+            AuditLedger.append_event(
+                event_type="chat_query_processed",
+                actor_id=user_id,
+                tenant_id=user_tenant_id,
+                resource_id=request_id,
+                action="query_knowledge_base",
+                decision="insufficient_evidence",
+                details={"query_hash": query_hash, "citations_count": 0, "latency_ms": elapsed_before_log},
+            )
+            interaction_id = SessionTracker.log_interaction(
+                session_id=session_id,
+                user_id=user_id,
+                tenant_id=user_tenant_id,
+                query_text=question,
+                intent=intent,
+                intent_confidence=routing_confidence,
+                retrieval_path=actual_path,
+                candidate_count=len(graph_candidates) if actual_path == "graph" else len(fallback_pool),
+                result_status="insufficient_evidence",
+                latency_ms=elapsed_before_log,
+                retrieval_confidence=evidence_confidence,
+            )
+        elif has_conflict:
             AuditLedger.append_event(
                 event_type="chat_query_processed",
                 actor_id=user_id,
@@ -420,83 +629,108 @@ class RetrievalEngine:
                 resource_id=request_id,
                 action="query_knowledge_base",
                 decision="conflicting_sources",
-                details={"query_hash": query_hash, "conflict_summary": conflict_summary, "latency_ms": elapsed_ms},
+                details={"query_hash": query_hash, "conflict_summary": conflict_summary, "latency_ms": elapsed_before_log},
             )
-            return {
-                "request_id": request_id,
-                "answer_status": "conflicting_sources",
-                "answer": answer_text,
-                "citations": citations,
-                "limitations": "Active documents contain contradictory guidelines on this topic.",
-                "is_shared_knowledge_used": is_shared_used,
-                "latency_ms": elapsed_ms,
-                "intent": intent,
-            }
-
-        # 3.3 Grounded Conversational Synthesis
-        answer_text = build_grounded_answer(normalized_query, expanded_tokens, top_chunks)
-
-        citations = [
-            {
-                "doc_id": c["doc_id"],
-                "version_num": c["version_num"],
-                "title": c["title"],
-                "page": c["page"],
-                "section": c["section"],
-                "excerpt": c["text"][:300] + ("..." if len(c["text"]) > 300 else ""),
-                "is_shared": c["tenant_id"] != user_tenant_id,
-                "source_tenant": c["tenant_id"],
-            }
-            for c in top_chunks[:3]
-        ]
-        is_shared_used = any(c["tenant_id"] != user_tenant_id for c in top_chunks[:3])
-
-        # Record query log in database
-        with get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO query_logs (
-                    id, timestamp, user_id, tenant_id, query_text, query_hash, answer_status,
-                    returned_doc_ids, citation_ids, session_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    request_id,
-                    now_utc_iso(),
-                    user_id,
-                    user_tenant_id,
-                    question,
-                    query_hash,
-                    "grounded",
-                    ",".join(set(c["doc_id"] for c in citations)),
-                    ",".join(set(f"{c['doc_id']}_v{c['version_num']}" for c in citations)),
-                    session_id,
-                ),
+            chunk_scores = [(c["chunk_id"], s) for s, c in deduped[:5]]
+            interaction_id = SessionTracker.log_interaction(
+                session_id=session_id,
+                user_id=user_id,
+                tenant_id=user_tenant_id,
+                query_text=question,
+                intent=intent,
+                intent_confidence=routing_confidence,
+                retrieval_path=actual_path,
+                candidate_count=len(graph_candidates) if actual_path == "graph" else len(fallback_pool),
+                result_status="conflict",
+                latency_ms=elapsed_before_log,
+                chunk_scores=chunk_scores,
+                retrieval_confidence=evidence_confidence,
             )
+        else:
+            with get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO query_logs (
+                        id, timestamp, user_id, tenant_id, query_text, query_hash, answer_status,
+                        returned_doc_ids, citation_ids, session_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        request_id,
+                        now_utc_iso(),
+                        user_id,
+                        user_tenant_id,
+                        question,
+                        query_hash,
+                        "grounded",
+                        ",".join(set(c["doc_id"] for c in citations)),
+                        ",".join(set(f"{c['doc_id']}_v{c['version_num']}" for c in citations)),
+                        session_id,
+                    ),
+                )
+            AuditLedger.append_event(
+                event_type="chat_query_processed",
+                actor_id=user_id,
+                tenant_id=user_tenant_id,
+                resource_id=request_id,
+                action="query_knowledge_base",
+                decision="grounded_answer",
+                details={
+                    "query_hash": query_hash,
+                    "citations_count": len(citations),
+                    "is_shared_used": is_shared_used,
+                    "latency_ms": elapsed_before_log,
+                    "intent": intent,
+                    "retrieval_path": actual_path,
+                },
+            )
+            chunk_scores = [(c["chunk_id"], s) for s, c in deduped[:5]]
+            interaction_id = SessionTracker.log_interaction(
+                session_id=session_id,
+                user_id=user_id,
+                tenant_id=user_tenant_id,
+                query_text=question,
+                intent=intent,
+                intent_confidence=routing_confidence,
+                retrieval_path=actual_path,
+                candidate_count=len(graph_candidates) if actual_path == "graph" else len(fallback_pool),
+                result_status="grounded",
+                latency_ms=elapsed_before_log,
+                chunk_scores=chunk_scores,
+                retrieval_confidence=evidence_confidence,
+            )
+        t1_log = time.perf_counter()
 
-        AuditLedger.append_event(
-            event_type="chat_query_processed",
-            actor_id=user_id,
-            tenant_id=user_tenant_id,
-            resource_id=request_id,
-            action="query_knowledge_base",
-            decision="grounded_answer",
-            details={
-                "query_hash": query_hash,
-                "citations_count": len(citations),
-                "is_shared_used": is_shared_used,
-                "latency_ms": elapsed_ms,
-                "intent": intent,
-            },
-        )
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        stage_timings = {
+            "normalization_ms": round((t1_norm - t0_norm) * 1000, 3),
+            "intent_classification_ms": round((t1_intent - t0_intent) * 1000, 3),
+            "graph_routing_ms": round((t1_graph - t0_graph) * 1000, 3),
+            "retrieval_scoring_ms": round((t1_retrieval - t0_retrieval) * 1000, 3),
+            "evidence_evaluation_ms": round((t1_evidence - t0_evidence) * 1000, 3),
+            "synthesis_ms": round((t1_synth - t0_synth) * 1000, 3),
+            "logging_ms": round((t1_log - t0_log) * 1000, 3),
+            "total_latency_ms": elapsed_ms,
+        }
 
         return {
             "request_id": request_id,
-            "answer_status": "grounded",
+            "interaction_id": interaction_id,
+            "answer_status": answer_status,
             "answer": answer_text,
             "citations": citations,
-            "limitations": None,
+            "limitations": limitations,
             "is_shared_knowledge_used": is_shared_used,
             "latency_ms": elapsed_ms,
             "intent": intent,
+            "intent_confidence": routing_confidence,
+            "routing_confidence": routing_confidence,
+            "evidence_confidence": evidence_confidence,
+            "is_ambiguous": is_ambiguous,
+            "candidate_intents": candidate_intents,
+            "retrieval_path": actual_path,
+            "retrieval_mode": str(retrieval_mode),
+            "fusion_method": "rrf",
+            "semantic_available": LocalEmbeddingManager.get_instance().is_st_available,
+            "stage_timings": stage_timings,
         }

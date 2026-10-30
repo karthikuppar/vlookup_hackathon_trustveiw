@@ -261,11 +261,12 @@ def build_insufficient_evidence_response(question: str) -> str:
         hint = "For benefits and insurance queries, please reach out to the HR department."
 
     response = (
-        "I wasn't able to find a specific answer to that in your organization's authorized SOP documents.\n\n"
+        "I couldn't find relevant information in the available SOPs to answer that question. "
+        "I cannot answer based on your organization's authorized SOP documents.\n\n"
         "This could mean:\n"
         "- The topic hasn't been documented in the current knowledge base yet\n"
         "- It may be covered under a different term or document section\n"
-        "- The document may not have been uploaded to AegisKB yet\n\n"
+        "- The document may not have been uploaded to the knowledge base yet\n\n"
     )
     if hint:
         response += f"💡 **Suggestion:** {hint}\n\n"

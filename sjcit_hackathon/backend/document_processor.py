@@ -14,6 +14,49 @@ except ImportError:
     pypdf = None
 
 
+import os
+
+ALLOWED_EXTENSIONS = {".pdf", ".txt", ".md"}
+MAX_DOCUMENT_BYTES = 15 * 1024 * 1024  # 15 MB
+MAX_PDF_PAGES = 200
+MAX_TEXT_CHARS = 5_000_000
+MAX_TITLE_CHARS = 200
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent path traversal, null bytes, and script execution."""
+    if not filename:
+        return "unnamed_document.txt"
+    base = os.path.basename(filename.replace("\\", "/"))
+    clean = re.sub(r"[\x00-\x1f\x7f]", "", base).strip().lstrip(".")
+    if not clean:
+        return "unnamed_document.txt"
+    return clean[:120]
+
+
+def validate_upload_parameters(filename: str, content_bytes: bytes, title: str) -> tuple[str, str, str | None]:
+    """
+    Validate file extension, size limit, and title constraints.
+    Returns: (sanitized_filename, sanitized_title, error_message)
+    """
+    clean_fn = sanitize_filename(filename)
+    ext = os.path.splitext(clean_fn.lower())[1]
+    if ext not in ALLOWED_EXTENSIONS:
+        return clean_fn, title, f"Unsupported file extension '{ext}'. Only .pdf, .txt, and .md files are permitted."
+
+    if len(content_bytes) > MAX_DOCUMENT_BYTES:
+        return clean_fn, title, f"File size ({len(content_bytes)} bytes) exceeds the maximum allowed limit of {MAX_DOCUMENT_BYTES // (1024 * 1024)} MB."
+
+    if not content_bytes or len(content_bytes.strip()) == 0:
+        return clean_fn, title, "Uploaded file is empty (0 bytes)."
+
+    clean_title = re.sub(r"[\x00-\x1f\x7f]", "", title or clean_fn).strip()[:MAX_TITLE_CHARS]
+    if not clean_title:
+        clean_title = clean_fn
+
+    return clean_fn, clean_title, None
+
+
 def extract_text_from_bytes(content: bytes, filename: str) -> tuple[list[dict[str, Any]], str | None]:
     """
     Extract text chunks with location metadata (page, section, char_offset).
@@ -32,6 +75,9 @@ def extract_text_from_bytes(content: bytes, filename: str) -> tuple[list[dict[st
             reader = pypdf.PdfReader(io.BytesIO(content))
             if len(reader.pages) == 0:
                 return [], "PDF contains 0 pages"
+            if len(reader.pages) > MAX_PDF_PAGES:
+                return [], f"PDF page count ({len(reader.pages)}) exceeds maximum permitted limit ({MAX_PDF_PAGES} pages)"
+
             for page_idx, page in enumerate(reader.pages, start=1):
                 page_text = page.extract_text() or ""
                 # Chunk page text by paragraphs / blocks
@@ -66,6 +112,9 @@ def extract_text_from_bytes(content: bytes, filename: str) -> tuple[list[dict[st
 
     if not text.strip():
         return [], "Document contains no text"
+
+    if len(text) > MAX_TEXT_CHARS:
+        return [], f"Document text size ({len(text)} characters) exceeds maximum limit ({MAX_TEXT_CHARS} characters)"
 
     # Chunk by paragraphs or sections
     blocks = [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
@@ -112,6 +161,29 @@ class DocumentService:
         content_bytes: bytes,
     ) -> dict[str, Any]:
         """Upload an initial document and version 1."""
+        filename, title, val_error = validate_upload_parameters(filename, content_bytes, title)
+        if val_error:
+            AuditLedger.append_event(
+                event_type="document_rejected_security",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                resource_id=filename,
+                action="upload_document",
+                decision="denied",
+                details={"reason": val_error, "filename": filename},
+            )
+            return {
+                "document_id": None,
+                "version_num": 0,
+                "title": title,
+                "filename": filename,
+                "content_digest": f"sha256:{sha256_digest(content_bytes)}",
+                "status": "failed",
+                "chunks_count": 0,
+                "error": val_error,
+                "transparency": None,
+            }
+
         doc_id = f"doc_{uuid.uuid4().hex[:12]}"
         now = now_utc_iso()
         digest = f"sha256:{sha256_digest(content_bytes)}"
@@ -171,6 +243,8 @@ class DocumentService:
             try:
                 from vector_store import InMemoryVectorDB
                 InMemoryVectorDB.get_instance().rebuild_tenant(tenant_id)
+                from sop_graph import SOPKnowledgeGraph
+                SOPKnowledgeGraph.get_instance().build_graph()
             except Exception:
                 pass
 
@@ -197,6 +271,27 @@ class DocumentService:
         filename: str,
     ) -> dict[str, Any]:
         """Atomic version replacement: supersedes previous version and activates new version."""
+        filename, _, val_error = validate_upload_parameters(filename, content_bytes, filename)
+        if val_error:
+            AuditLedger.append_event(
+                event_type="document_rejected_security",
+                actor_id=user_id,
+                tenant_id=tenant_id,
+                resource_id=doc_id,
+                action="replace_version",
+                decision="denied",
+                details={"reason": val_error, "filename": filename},
+            )
+            return {
+                "document_id": doc_id,
+                "version_num": 0,
+                "content_digest": f"sha256:{sha256_digest(content_bytes)}",
+                "status": "failed",
+                "chunks_count": 0,
+                "error": val_error,
+                "transparency": None,
+            }
+
         now = now_utc_iso()
         digest = f"sha256:{sha256_digest(content_bytes)}"
         chunks, error = extract_text_from_bytes(content_bytes, filename)
@@ -266,6 +361,8 @@ class DocumentService:
             try:
                 from vector_store import InMemoryVectorDB
                 InMemoryVectorDB.get_instance().rebuild_tenant(tenant_id)
+                from sop_graph import SOPKnowledgeGraph
+                SOPKnowledgeGraph.get_instance().build_graph()
             except Exception:
                 pass
 

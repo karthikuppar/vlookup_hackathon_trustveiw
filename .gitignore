@@ -22,3 +22,13 @@ build/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Secrets & Local State
+.jwt_secret
+*.jwt_secret
+
+# Model weights & binaries
+models/
+*.safetensors
+*.bin
+

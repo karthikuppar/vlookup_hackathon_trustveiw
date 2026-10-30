@@ -76,6 +76,12 @@ class AuditLedger:
                 ),
             )
 
+        if next_seq % 25 == 0:
+            try:
+                AuditLedger.create_checkpoint()
+            except Exception:
+                pass
+
         return {
             "sequence": next_seq,
             "event_id": event_id,
@@ -144,13 +150,79 @@ class AuditLedger:
             expected_prev_hash = row["entry_hash"]
             expected_seq += 1
 
+        # 4. Checkpoint integrity and truncation detection
+        with get_connection() as conn:
+            checkpoints = conn.execute(
+                "SELECT id, timestamp, sequence_head, chain_head_hash, signature FROM ledger_checkpoints ORDER BY sequence_head ASC"
+            ).fetchall()
+
+        import hmac as py_hmac
+        from crypto_utils import HMAC_KEY
+
+        for cp in checkpoints:
+            cp_seq = cp["sequence_head"]
+            cp_hash = cp["chain_head_hash"]
+            # Detect truncation attack: checkpoint sequence exceeds available records
+            if cp_seq > len(rows):
+                return {
+                    "valid": False,
+                    "tampered_sequence": cp_seq,
+                    "error_type": "truncation_attack_detected",
+                    "reason": f"Checkpoint references sequence {cp_seq}, but ledger only contains {len(rows)} entries (truncation detected)",
+                    "checkpoint_id": cp["id"],
+                }
+            # Verify checkpoint signature
+            expected_sig = py_hmac.new(HMAC_KEY, f"{cp_seq}:{cp_hash}:{cp['timestamp']}".encode("utf-8"), "sha256").hexdigest()
+            if cp["signature"] != expected_sig:
+                return {
+                    "valid": False,
+                    "tampered_sequence": cp_seq,
+                    "error_type": "checkpoint_signature_invalid",
+                    "reason": f"Checkpoint {cp['id']} signature verification failed",
+                }
+            # Verify matching hash at checkpoint sequence
+            matching_row = rows[cp_seq - 1]
+            if matching_row["entry_hash"] != cp_hash:
+                return {
+                    "valid": False,
+                    "tampered_sequence": cp_seq,
+                    "error_type": "checkpoint_hash_mismatch",
+                    "reason": f"Audit entry hash at sequence {cp_seq} does not match checkpoint recorded hash",
+                }
+
+        # If no checkpoint exists yet and we have events, create the first baseline checkpoint
+        if not checkpoints and len(rows) > 0:
+            AuditLedger.create_checkpoint()
+
         return {
             "valid": True,
             "total_events": len(rows),
+            "checkpoints_verified": len(checkpoints),
             "chain_head": rows[-1]["entry_hash"],
             "verified_at": now_utc_iso(),
-            "message": "Cryptographic hash chain is 100% intact and valid",
+            "message": "Cryptographic hash chain and protected checkpoints are 100% intact and valid",
         }
+
+    @staticmethod
+    def create_checkpoint() -> dict[str, Any] | None:
+        """Create a cryptographic HMAC checkpoint of the current ledger state."""
+        import hmac as py_hmac
+        from crypto_utils import HMAC_KEY
+        with get_connection() as conn:
+            last = conn.execute("SELECT sequence, entry_hash FROM audit_events ORDER BY sequence DESC LIMIT 1").fetchone()
+            if not last:
+                return None
+            seq_head = last["sequence"]
+            head_hash = last["entry_hash"]
+            ts = now_utc_iso()
+            chk_id = f"chkpt_{uuid.uuid4().hex[:12]}"
+            sig_payload = f"{seq_head}:{head_hash}:{ts}"
+            signature = py_hmac.new(HMAC_KEY, sig_payload.encode("utf-8"), "sha256").hexdigest()
+            conn.execute(
+                "INSERT INTO ledger_checkpoints (id, timestamp, sequence_head, chain_head_hash, signature) VALUES (?, ?, ?, ?, ?)",
+                (chk_id, ts, seq_head, head_hash, signature),
+            )
+            return {"checkpoint_id": chk_id, "sequence_head": seq_head, "chain_head_hash": head_hash, "signature": signature}
 
     @staticmethod
     def tamper_for_demo(sequence: int | None = None) -> dict[str, Any]:

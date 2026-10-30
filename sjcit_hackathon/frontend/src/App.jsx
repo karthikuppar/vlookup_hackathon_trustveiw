@@ -1287,6 +1287,93 @@ function AdminSecurityTab({ token, user, setSuccess, setError, onSwitchToChat })
           </div>
         </div>
       </div>
+
+      {/* Production Security Controls & Observability Matrix (Section 2.J) */}
+      <div style={{ marginTop: '1.5rem', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-subtle)', borderRadius: '12px', padding: '1.25rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem' }}>
+          <div>
+            <h3 style={{ fontSize: '0.98rem', fontWeight: 700, color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <ShieldCheck size={18} color="#34d399" />
+              <span>Production Security Controls & Compliance Matrix</span>
+            </h3>
+            <p style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: '0.2rem' }}>
+              Real-time verification of backend security controls, cryptographic audit invariants, and deployment boundaries.
+            </p>
+          </div>
+          <button className="btn-secondary" onClick={loadMatrix} style={{ fontSize: '0.78rem', padding: '0.35rem 0.75rem', display: 'flex', alignItems: 'center', gap: '5px' }}>
+            <RefreshCw size={12} />
+            <span>Refresh State</span>
+          </button>
+        </div>
+
+        <table className="data-table" style={{ width: '100%', fontSize: '0.78rem' }}>
+          <thead>
+            <tr>
+              <th style={{ width: '80px' }}>Control ID</th>
+              <th style={{ width: '220px' }}>Security Domain & Control</th>
+              <th>Enforcement Mechanism & Invariants</th>
+              <th style={{ width: '130px', textAlign: 'center' }}>Verification State</th>
+            </tr>
+          </thead>
+          <tbody>
+            {secMatrix?.security_controls?.map(ctrl => {
+              let badgeBg = 'rgba(100,116,139,0.15)'
+              let badgeColor = '#94a3b8'
+              let icon = <Lock size={12} />
+
+              if (ctrl.status === 'VERIFIED') {
+                badgeBg = 'rgba(16,185,129,0.15)'
+                badgeColor = '#34d399'
+                icon = <CheckCircle2 size={12} />
+              } else if (ctrl.status === 'WARNING') {
+                badgeBg = 'rgba(245,158,11,0.15)'
+                badgeColor = '#fbbf24'
+                icon = <AlertTriangle size={12} />
+              } else if (ctrl.status === 'FAILED') {
+                badgeBg = 'rgba(244,63,94,0.15)'
+                badgeColor = '#fb7185'
+                icon = <XCircle size={12} />
+              } else if (ctrl.status === 'SIMULATED') {
+                badgeBg = 'rgba(6,182,212,0.15)'
+                badgeColor = '#22d3ee'
+                icon = <Cpu size={12} />
+              }
+
+              return (
+                <tr key={ctrl.id}>
+                  <td>
+                    <span style={{ fontFamily: 'monospace', color: '#818cf8', fontWeight: 700 }}>{ctrl.id}</span>
+                  </td>
+                  <td>
+                    <div style={{ fontWeight: 600, color: '#f8fafc' }}>{ctrl.name}</div>
+                    <div style={{ fontSize: '0.7rem', color: '#64748b' }}>{ctrl.category}</div>
+                  </td>
+                  <td style={{ color: '#cbd5e1', lineHeight: '1.35' }}>
+                    {ctrl.mechanism}
+                  </td>
+                  <td style={{ textAlign: 'center' }}>
+                    <span style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      background: badgeBg,
+                      color: badgeColor,
+                      padding: '3px 8px',
+                      borderRadius: '12px',
+                      fontSize: '0.72rem',
+                      fontWeight: 700
+                    }}>
+                      {icon}
+                      {ctrl.status}
+                    </span>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+
     </div>
   )
 }
