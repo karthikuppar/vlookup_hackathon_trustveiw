@@ -307,6 +307,61 @@ def init_db():
             ip_address TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_login_attempts_ident ON login_attempts(identifier, attempted_at);
+
+        -- Security Testing, Vulnerability Assessment & Remediation Centre
+        CREATE TABLE IF NOT EXISTS security_scans (
+            id TEXT PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            status TEXT NOT NULL DEFAULT 'RUNNING',
+            total_tests INTEGER NOT NULL DEFAULT 0,
+            passed_tests INTEGER NOT NULL DEFAULT 0,
+            failed_tests INTEGER NOT NULL DEFAULT 0,
+            critical_count INTEGER NOT NULL DEFAULT 0,
+            high_count INTEGER NOT NULL DEFAULT 0,
+            medium_count INTEGER NOT NULL DEFAULT 0,
+            low_count INTEGER NOT NULL DEFAULT 0,
+            scope TEXT NOT NULL DEFAULT 'FULL_ASSESSMENT',
+            duration_seconds REAL DEFAULT 0.0,
+            execution_log TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_scans_date ON security_scans(started_at DESC);
+
+        CREATE TABLE IF NOT EXISTS security_findings (
+            id TEXT PRIMARY KEY,
+            scan_id TEXT NOT NULL,
+            test_case_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            category TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            risk_score REAL NOT NULL,
+            affected_component TEXT NOT NULL,
+            affected_file TEXT,
+            root_cause TEXT NOT NULL,
+            potential_impact TEXT NOT NULL,
+            recommended_remediation TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'OPEN',
+            evidence_json TEXT,
+            detected_at TEXT NOT NULL,
+            resolved_at TEXT,
+            FOREIGN KEY(scan_id) REFERENCES security_scans(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_findings_scan ON security_findings(scan_id, severity, status);
+
+        CREATE TABLE IF NOT EXISTS security_remediations (
+            id TEXT PRIMARY KEY,
+            finding_id TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            proposed_patch TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PROPOSED',
+            requires_approval INTEGER NOT NULL DEFAULT 0,
+            applied_at TEXT,
+            verified_at TEXT,
+            rollback_patch TEXT,
+            remediation_notes TEXT,
+            FOREIGN KEY(finding_id) REFERENCES security_findings(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_remediations_finding ON security_remediations(finding_id, status);
         """)
         # Migration: older databases lack the column that lets verify() recompute each payload digest.
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(audit_events)").fetchall()}

@@ -260,6 +260,15 @@ RICH_SYNONYMS: dict[str, list[str]] = {
     "onboarding": ["first day", "induction", "new hire", "orientation", "day 1", "checklist"],
     "new": ["onboarding", "hire", "joiner", "fresh", "first day"],
 
+    # Policies, SOPs, Summaries & Guidelines
+    "policy": ["policies", "sop", "sops", "procedure", "guidelines", "rules", "standards", "handbook"],
+    "policies": ["policy", "sop", "sops", "procedure", "guidelines", "rules", "standards", "handbook"],
+    "sop": ["sops", "policy", "policies", "procedure", "guidelines", "standard operating procedure"],
+    "sops": ["sop", "policy", "policies", "procedure", "guidelines", "standard operating procedure"],
+    "summary": ["summaries", "overview", "brief", "digest", "sop", "policy", "guidelines"],
+    "summaries": ["summary", "overview", "brief", "digest", "sop", "policy", "guidelines"],
+    "summarize": ["summary", "overview", "brief", "sop", "policy"],
+
     # Leave & Time Off
     "leave": ["vacation", "time off", "holiday", "absence", "pto", "annual leave", "sick leave"],
     "vacation": ["leave", "time off", "holiday", "annual leave", "pto"],

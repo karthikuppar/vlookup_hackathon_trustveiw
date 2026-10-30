@@ -165,6 +165,10 @@ class TeeVerifyRequest(BaseModel):
     quote_signature: str | None = None
 
 
+class SecurityScanTriggerRequest(BaseModel):
+    scope: list[str] | None = None
+
+
 # --- Authentication & Current User Dependency ---
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict[str, Any]:
     payload = decode_access_token(token)
@@ -916,18 +920,44 @@ def list_knowledge_shares(user: dict[str, Any] = Depends(get_current_user)):
     return SharingService.list_shares(user["tenant_id"])
 
 
-# --- Chat & Grounded Querying (Section 3.4) ---
+# --- Model Health & CPU Runtime Status ---
+@app.get("/api/model/health")
+def get_model_health():
+    """
+    Returns health status of local Llama runtime and dense embedding model.
+    """
+    from llama_service import LlamaService
+    from embedding_manager import LocalEmbeddingManager
+
+    llama_status = LlamaService.get_instance().get_health()
+    emb_status = LocalEmbeddingManager.get_instance().get_status()
+
+    return {
+        "status": llama_status.get("status", "unavailable"),
+        "llama": llama_status,
+        "embedding": emb_status,
+        "hybrid_rag_enabled": True,
+        "cpu_compatible": True,
+    }
+
+
+# --- Chat & Grounded Querying (Section 3.4 & 4) ---
 @app.post("/api/chat/query")
-def chat_query(req: ChatQueryRequest, user: dict[str, Any] = Depends(get_current_user)):
+async def chat_query(req: ChatQueryRequest, user: dict[str, Any] = Depends(get_current_user)):
     """
     Non-negotiable server-side boundary:
     Derives user tenant strictly from verified session.
-    Routes queries through lightweight in-process SOP knowledge graph.
-    Logs persistent session and interaction metrics in SQLite.
+    Routes queries through QueryRouter (Knowledge vs Conversation vs Mixed).
+    Leverages CPU-compatible local Llama for intelligent RAG synthesis with structured citations.
+    Falls back gracefully to deterministic extractive synthesis if Llama runtime is offline.
     """
     throttle("chat", user["id"])
     from session_tracker import SessionTracker
+    from query_router import QueryRouter, QueryCategory
+    from rag_pipeline import RAGPipeline
+
     actual_session_id = SessionTracker.ensure_user_session(req.session_id, user["id"])
+    route_info = QueryRouter.classify(req.question)
 
     res = RetrievalEngine.query_knowledge_base(
         user_id=user["id"],
@@ -935,9 +965,61 @@ def chat_query(req: ChatQueryRequest, user: dict[str, Any] = Depends(get_current
         question=req.question,
         session_id=actual_session_id,
     )
+
+    # Attach routing category metadata
+    res["query_category"] = route_info["category"]
+    res["routing_confidence"] = route_info["confidence"]
+
+    # If retrieval found grounded evidence, invoke local Llama RAG
+    enable_llama_rag = os.environ.get("ENABLE_LLAMA_RAG", "true").lower() in {"1", "true", "yes"}
+
+    if enable_llama_rag and res.get("answer_status") == "grounded" and res.get("citations"):
+        chunks_for_rag = [
+            {
+                "document_id": c.get("doc_id", ""),
+                "document_name": c.get("title", ""),
+                "version": c.get("version_num", "v1"),
+                "page": c.get("page", 1),
+                "section": c.get("section", ""),
+                "content": c.get("content") or c.get("excerpt", ""),
+                "score": res.get("evidence_confidence", 0.9),
+            }
+            for c in res.get("citations", [])
+        ]
+
+        conv_history = []
+        if route_info["category"] == QueryCategory.MIXED_QUERY:
+            try:
+                with get_connection() as conn:
+                    rows = conn.execute(
+                        "SELECT role, content FROM session_messages WHERE session_id = ? ORDER BY timestamp ASC LIMIT 6",
+                        (actual_session_id,),
+                    ).fetchall()
+                    conv_history = [dict(r) for r in rows]
+            except Exception:
+                pass
+
+        rag_res = await RAGPipeline.get_instance().execute_rag(
+            question=req.question,
+            retrieved_chunks=chunks_for_rag,
+            conversation_history=conv_history,
+            query_category=route_info["category"],
+        )
+
+        if rag_res.get("answer") and not rag_res.get("fallback_required"):
+            res["answer"] = rag_res["answer"]
+            res["answer_status"] = rag_res.get("answer_status", res["answer_status"])
+            res["model_used"] = rag_res.get("model_used")
+            res["generation_mode"] = "local_llama_rag"
+        else:
+            res["generation_mode"] = "extractive_fallback"
+            res["model_used"] = "extractive_synthesizer"
+    else:
+        res["generation_mode"] = "extractive_fastpath"
+        res["model_used"] = "extractive_synthesizer"
+
     # Some non-retrieval fast paths (for example greetings and security refusals)
-    # return before the retrieval engine's normal logging stage.  They remain
-    # traceable here without creating a second record for regular queries.
+    # return before the retrieval engine's normal logging stage.
     if not res.get("interaction_id"):
         res["interaction_id"] = SessionTracker.log_interaction(
             session_id=actual_session_id, user_id=user["id"], tenant_id=user["tenant_id"],
@@ -1330,6 +1412,198 @@ def get_security_matrix(user: dict[str, Any] = Depends(get_current_user)):
     }
 
 
+# =============================================================================
+# Security Testing, Vulnerability Assessment & Automated Remediation Centre
+# =============================================================================
+
+@app.get("/api/admin/security/categories")
+def get_security_categories(user: dict[str, Any] = Depends(get_current_user)):
+    """Returns the 20 mandatory security test categories."""
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    from security.config import SECURITY_CATEGORIES
+    return [
+        {"key": k, "name": v["name"], "description": v["description"], "default_severity": v["default_severity"]}
+        for k, v in SECURITY_CATEGORIES.items()
+    ]
+
+
+@app.post("/api/admin/security/scans")
+def trigger_security_scan(
+    req: SecurityScanTriggerRequest | None = None,
+    user: dict[str, Any] = Depends(get_current_user)
+):
+    """Executes a real security assessment against the application instance."""
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    from security.security_service import SecurityService
+    scope = req.scope if req else None
+    result = SecurityService.run_security_scan(app, scope=scope)
+
+    AuditLedger.append_event(
+        event_type="security_assessment_executed",
+        actor_id=user["id"],
+        tenant_id=user["tenant_id"],
+        resource_id=result["id"],
+        action=f"Executed security scan {result['id']} (Scope: {result['scope']})",
+        decision="PERMITTED",
+        details={
+            "scan_id": result["id"],
+            "total_tests": result["total_tests"],
+            "findings_count": result["findings_count"],
+            "duration_seconds": result["duration_seconds"],
+        },
+    )
+    return result
+
+
+@app.get("/api/admin/security/scans")
+def list_security_scans(user: dict[str, Any] = Depends(get_current_user)):
+    """Lists past security assessment scans."""
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    from security.security_service import SecurityService
+    return SecurityService.list_scans()
+
+
+@app.get("/api/admin/security/scans/{scan_id}")
+def get_security_scan_details(scan_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    """Retrieves full scan results, execution logs, and detected vulnerabilities."""
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    from security.security_service import SecurityService
+    scan = SecurityService.get_scan(scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan record not found")
+    return scan
+
+
+@app.get("/api/admin/security/findings")
+def list_security_findings(
+    scan_id: str | None = None,
+    severity: str | None = None,
+    status: str | None = None,
+    user: dict[str, Any] = Depends(get_current_user)
+):
+    """Lists detected security vulnerabilities with optional filtering."""
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    from security.security_service import SecurityService
+    return SecurityService.list_findings(scan_id=scan_id, severity=severity, status=status)
+
+
+@app.get("/api/admin/security/findings/{finding_id}")
+def get_security_finding_details(finding_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    """Retrieves single finding details, root cause, code references, and remediation status."""
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    from security.security_service import SecurityService
+    finding = SecurityService.get_finding(finding_id)
+    if not finding:
+        raise HTTPException(status_code=404, detail="Finding not found")
+    return finding
+
+
+@app.post("/api/admin/security/findings/{finding_id}/remediate")
+def apply_remediation_for_finding(finding_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    """Applies proposed remediation patch for a finding."""
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    from security.security_service import SecurityService
+    from security.remediation_engine import RemediationEngine
+
+    finding = SecurityService.get_finding(finding_id)
+    if not finding:
+        raise HTTPException(status_code=404, detail="Finding not found")
+
+    rem_id = finding.get("remediation_id")
+    if not rem_id:
+        prop = RemediationEngine.propose_remediation(finding)
+        rem_id = prop["id"]
+
+    result = RemediationEngine.apply_remediation(rem_id, actor_id=user["id"])
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Failed to apply remediation"))
+
+    AuditLedger.append_event(
+        event_type="security_remediation_applied",
+        actor_id=user["id"],
+        tenant_id=user["tenant_id"],
+        resource_id=rem_id,
+        action=f"Applied remediation {rem_id} for finding {finding_id}",
+        decision="PERMITTED",
+        details=result,
+    )
+    return result
+
+
+@app.post("/api/admin/security/remediations/{remediation_id}/verify")
+def verify_remediation(remediation_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    """Re-executes targeted security test to verify remediation effectiveness."""
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    from security.test_engine import SecurityTestEngine
+    from security.remediation_engine import RemediationEngine
+
+    engine = SecurityTestEngine(app)
+    result = RemediationEngine.verify_remediation(remediation_id, engine)
+
+    AuditLedger.append_event(
+        event_type="security_remediation_verified",
+        actor_id=user["id"],
+        tenant_id=user["tenant_id"],
+        resource_id=remediation_id,
+        action=f"Verified remediation {remediation_id}: outcome {result.get('status')}",
+        decision="PERMITTED",
+        details=result,
+    )
+    return result
+
+
+@app.post("/api/admin/security/remediations/{remediation_id}/rollback")
+def rollback_remediation(remediation_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    """Rolls back an applied patch to pre-remediation state."""
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    from security.remediation_engine import RemediationEngine
+
+    result = RemediationEngine.rollback_remediation(remediation_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Rollback failed"))
+
+    AuditLedger.append_event(
+        event_type="security_remediation_rolled_back",
+        actor_id=user["id"],
+        tenant_id=user["tenant_id"],
+        resource_id=remediation_id,
+        action=f"Rolled back remediation {remediation_id}",
+        decision="PERMITTED",
+        details=result,
+    )
+    return result
+
+
+@app.get("/api/admin/security/stats")
+def get_security_stats(user: dict[str, Any] = Depends(get_current_user)):
+    """Retrieves overall security posture score and finding metrics."""
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    from security.security_service import SecurityService
+    return SecurityService.get_posture_stats()
+
+
+@app.get("/api/admin/security/reports/{scan_id}/export")
+def export_security_report(scan_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    """Generates and exports comprehensive assessment report conforming to Section 6."""
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    from security.security_service import SecurityService
+    report = SecurityService.generate_assessment_report(scan_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report for scan not found")
+    return report
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=os.getenv("HOST", "127.0.0.1"), port=int(os.getenv("PORT", "8000")))
+    uvicorn.run(app, host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "8000")))

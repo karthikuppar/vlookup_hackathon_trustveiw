@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Shield, MessageSquare, FileText, Share2, Database, Cpu, LogOut, User, ShieldCheck } from 'lucide-react'
+import { Shield, MessageSquare, FileText, Share2, Database, Cpu, LogOut, User, ShieldCheck, Wrench } from 'lucide-react'
 import { getSession, saveSession, clearSession } from './services/session'
 import { isAdminRole } from './services/http'
 import Banner from './components/Banner'
@@ -10,6 +10,7 @@ import SharingView from './views/SharingView'
 import LedgerView from './views/LedgerView'
 import TeeView from './views/TeeView'
 import AdminSecurityView from './views/AdminSecurityView'
+import SecurityCentreSection from './SecurityCentreSection'
 
 export default function App() {
   const [session, setSession] = useState(() => getSession())
@@ -43,7 +44,10 @@ export default function App() {
     { id: 'sharing', label: 'Knowledge Sharing', icon: Share2 },
     { id: 'ledger', label: 'Audit Ledger', icon: Database },
     { id: 'tee', label: 'TEE Simulation', icon: Cpu },
-    ...(isAdmin ? [{ id: 'admin_security', label: 'Admin & Security Hub', icon: ShieldCheck }] : []),
+    ...(isAdmin ? [
+      { id: 'admin_security', label: 'Admin & Security Hub', icon: ShieldCheck },
+      { id: 'security_centre', label: 'Security & Remediation Centre', icon: Wrench },
+    ] : []),
   ]
   const tab = tabs.some(t => t.id === activeTab) ? activeTab : 'chat'
 
@@ -109,6 +113,9 @@ export default function App() {
         {tab === 'tee' && <TeeView token={token} setSuccess={setSuccessMsg} setError={setErrorMsg} />}
         {tab === 'admin_security' && isAdmin && (
           <AdminSecurityView token={token} user={session.user} setSuccess={setSuccessMsg} setError={setErrorMsg} />
+        )}
+        {tab === 'security_centre' && isAdmin && (
+          <SecurityCentreSection token={token} user={session.user} setSuccess={setSuccessMsg} setError={setErrorMsg} />
         )}
       </main>
     </div>
