@@ -4,3 +4,4 @@ python-jose[cryptography]
 bcrypt==4.0.1
 pydantic[email]
 httpx
+pypdf

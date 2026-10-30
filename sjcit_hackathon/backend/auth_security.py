@@ -2,7 +2,7 @@
 
 import os
 import hmac
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import bcrypt
@@ -11,7 +11,7 @@ from jose import JWTError, jwt
 SECRET_KEY = os.getenv("SECRET_KEY", "change_this_to_a_long_random_secret_string")
 REFRESH_SECRET_KEY = os.getenv("REFRESH_SECRET_KEY", "refresh_change_this_to_a_long_random_secret")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 15
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
 REFRESH_TOKEN_EXPIRE_DAYS = 7
 
 MAX_PASSWORD_BYTES = 72
@@ -49,8 +49,6 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         except (ValueError, TypeError):
             return False
 
-    # Backward compatibility for older local/dev databases that stored
-    # password_hash as plain text before bcrypt was wired in.
     return hmac.compare_digest(plain_password, stored_password)
 
 
@@ -63,14 +61,14 @@ def password_needs_rehash(hashed_password: str) -> bool:
 
 def create_access_token(data: dict, expires_minutes: int = ACCESS_TOKEN_EXPIRE_MINUTES) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=expires_minutes)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=expires_minutes)
     to_encode.update({"exp": expire, "type": "access"})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def create_refresh_token(data: dict, expires_days: int = REFRESH_TOKEN_EXPIRE_DAYS) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=expires_days)
+    expire = datetime.now(timezone.utc) + timedelta(days=expires_days)
     to_encode.update({"exp": expire, "type": "refresh"})
     return jwt.encode(to_encode, REFRESH_SECRET_KEY, algorithm=ALGORITHM)
 
