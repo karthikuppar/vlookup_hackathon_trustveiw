@@ -166,7 +166,7 @@ class TeeVerifyRequest(BaseModel):
 
 
 class SecurityScanTriggerRequest(BaseModel):
-    scope: list[str] | None = None
+    scope: list[str] | str | None = None
 
 
 # --- Authentication & Current User Dependency ---
