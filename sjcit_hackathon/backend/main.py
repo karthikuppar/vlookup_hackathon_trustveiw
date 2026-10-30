@@ -1,15 +1,18 @@
 """PS-04 Secure Multi-Client Knowledge Chatbot - Main FastAPI Server."""
 from __future__ import annotations
+import logging
 import os
 import json
 import uuid
-from typing import Any
+from typing import Any, Literal
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, EmailStr, Field
 
+from abuse_guard import limiter
 from auth_security import (
+    DUMMY_PASSWORD_HASH,
     check_login_rate_limit,
     create_access_token,
     decode_access_token,
@@ -29,18 +32,31 @@ from trust_view import KNOWLEDGE_GAP_CONFIDENCE_THRESHOLD
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
+log = logging.getLogger("aegiskb.security")
+_DOCS_ENABLED = os.getenv("AEGIS_ENABLE_DOCS", "0") == "1"
+_IS_PRODUCTION = os.getenv("AEGIS_ENV", "").lower() == "production"
+MAX_UPLOAD_BYTES = int(os.getenv("AEGIS_MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
+
 app = FastAPI(
     title="PS-04: Secure Multi-Client Knowledge Chatbot",
     version="1.0.0",
     description="Offline-capable, tenant-isolated document-grounded chatbot with blockchain-lite audit and TEE simulation.",
+    # The interactive API explorer is an unauthenticated map of every route: opt-in only.
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
 
+# Credentialed CORS must name its origins: "*" with allow_credentials reflects any caller's Origin.
+# Defaults cover the Vite dev server; set AEGIS_CORS_ORIGINS (comma-separated) for a real deployment.
+_CORS_ORIGINS = [o.strip() for o in os.getenv(
+    "AEGIS_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -53,16 +69,28 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "font-src 'self' data: https://fonts.gstatic.com; "
-        "img-src 'self' data:; "
-        "connect-src 'self' *; "
-        "frame-ancestors 'none';"
-    )
+    if _DOCS_ENABLED and request.url.path in {"/docs", "/redoc"}:
+        # Swagger UI needs inline script and its CDN assets; only reachable when docs are opted in.
+        response.headers["Content-Security-Policy"] = "default-src 'self' https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https://fastapi.tiangolo.com; frame-ancestors 'none'"
+    else:
+        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    response.headers.setdefault("Cache-Control", "no-store")
     return response
+
+
+def client_ip(request: Request) -> str:
+    """The socket peer. X-Forwarded-For is client-controlled, so it is deliberately NOT trusted here."""
+    return request.client.host if request.client else "unknown"
+
+
+def require_admin(user: dict[str, Any]) -> None:
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: administrator privilege required")
+
+
+def throttle(bucket: str, subject: str) -> None:
+    if not limiter.allow(bucket, subject):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded; slow down and retry shortly", headers={"Retry-After": "30"})
 
 
 # --- Pydantic Request Models ---
@@ -70,8 +98,8 @@ class RegisterRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     email: EmailStr
     password: str = Field(min_length=8, max_length=64)
-    role: str = "client_employee"  # system_admin, client_admin, client_employee
     tenant_id: str
+    # No `role` field: self-registration can only ever create a client_employee.
 
 
 class LoginRequest(BaseModel):
@@ -85,10 +113,11 @@ class CreateClientRequest(BaseModel):
 
 
 class AddMemberRequest(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=100)
     email: EmailStr
-    password: str = Field(min_length=8)
-    role: str = "client_employee"
+    password: str = Field(min_length=8, max_length=64)
+    # system_admin can never be granted through the API: it is cross-tenant and is only created by bootstrap.
+    role: Literal["client_admin", "client_employee"] = "client_employee"
 
 
 class DirectDocUploadRequest(BaseModel):
@@ -164,7 +193,9 @@ def on_startup():
     except Exception as e:
         print(f"SessionTracker init warning: {e}")
 
-    seed_demo_data()
+    bootstrap_system_admin()
+    if os.getenv("AEGIS_SEED_DEMO", "0") == "1":
+        seed_demo_data()
     try:
         from vector_store import InMemoryVectorDB
         InMemoryVectorDB.get_instance().rebuild_all()
@@ -187,8 +218,33 @@ def on_shutdown():
         print(f"SessionTracker shutdown warning: {e}")
 
 
+def bootstrap_system_admin() -> None:
+    """Create the first system administrator from the environment when no users exist yet."""
+    email, password = os.getenv("AEGIS_BOOTSTRAP_ADMIN_EMAIL"), os.getenv("AEGIS_BOOTSTRAP_ADMIN_PASSWORD")
+    with get_connection() as conn:
+        if conn.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+            return
+        if not (email and password and len(password) >= 12):
+            log.warning("No users exist. Set AEGIS_BOOTSTRAP_ADMIN_EMAIL and AEGIS_BOOTSTRAP_ADMIN_PASSWORD (12+ chars) "
+                        "to create the first administrator, or AEGIS_SEED_DEMO=1 for local demo accounts.")
+            return
+        now = now_utc_iso()
+        conn.execute("INSERT OR IGNORE INTO tenants VALUES ('system', 'Platform Administration', ?)", (now,))
+        conn.execute("INSERT INTO users VALUES (?, ?, ?, ?, 'system_admin', 'system', ?)",
+                     (f"usr_{uuid.uuid4().hex[:12]}", "System Administrator", email.lower(), hash_password(password), now))
+    log.warning("Created the bootstrap system administrator %s", email.lower())
+
+
+DEMO_PASSWORD = os.getenv("AEGIS_DEMO_PASSWORD", "Password123!")
+
+
 def seed_demo_data():
-    """Seed initial sample clients and conflicting documents for Section 12 demo scenarios."""
+    """Seed initial sample clients and conflicting documents for Section 12 demo scenarios.
+
+    Demo accounts share a well-known password, so this is opt-in (AEGIS_SEED_DEMO=1) and refused in production."""
+    if _IS_PRODUCTION:
+        raise RuntimeError("Refusing to seed demo accounts with a known password when AEGIS_ENV=production")
+    log.warning("Seeding DEMO accounts with a shared password. Never expose this instance to a network.")
     with get_connection() as conn:
         now = now_utc_iso()
         # 1. Seed Tenants
@@ -197,7 +253,7 @@ def seed_demo_data():
         conn.execute("INSERT OR IGNORE INTO tenants VALUES ('tenant_b', 'BetaShield Security', ?)", (now,))
 
         # 2. Seed Users
-        pwd_hash = hash_password("Password123!")
+        pwd_hash = hash_password(DEMO_PASSWORD)
         conn.execute("INSERT OR IGNORE INTO users VALUES ('usr_sysadmin', 'System SuperAdmin', 'sysadmin@ps04platform.com', ?, 'system_admin', 'system', ?)", (pwd_hash, now))
         conn.execute("INSERT OR IGNORE INTO users VALUES ('usr_admin_a', 'Alice Admin', 'admin@acrocorp.com', ?, 'client_admin', 'tenant_a', ?)", (pwd_hash, now))
         conn.execute("INSERT OR IGNORE INTO users VALUES ('usr_emp_a', 'Edward Employee', 'employee@acrocorp.com', ?, 'client_employee', 'tenant_a', ?)", (pwd_hash, now))
@@ -494,8 +550,14 @@ def health_check():
 
 # --- Auth Routes ---
 @app.post("/api/auth/register", status_code=status.HTTP_201_CREATED)
-def register_user(req: RegisterRequest):
+def register_user(req: RegisterRequest, request: Request):
+    # Open registration lets anyone join any tenant and read its documents, so it is off unless an operator
+    # explicitly enables it. Even then the account is always a client_employee.
+    if os.getenv("AEGIS_ALLOW_SELF_REGISTER", "0") != "1":
+        raise HTTPException(status_code=403, detail="Self-registration is disabled. Ask your administrator to create your account.")
+    throttle("register", client_ip(request))
     email = str(req.email).lower()
+    role = "client_employee"
     with get_connection() as conn:
         tenant = conn.execute("SELECT id FROM tenants WHERE id = ?", (req.tenant_id,)).fetchone()
         if not tenant:
@@ -510,7 +572,7 @@ def register_user(req: RegisterRequest):
         pwd_hash = hash_password(req.password)
         conn.execute(
             "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (user_id, req.name.strip(), email, pwd_hash, req.role, req.tenant_id, now),
+            (user_id, req.name.strip(), email, pwd_hash, role, req.tenant_id, now),
         )
 
     AuditLedger.append_event(
@@ -520,23 +582,28 @@ def register_user(req: RegisterRequest):
         resource_id=user_id,
         action="register_account",
         decision="permitted",
-        details={"email": email, "role": req.role},
+        details={"email": email, "role": role},
     )
 
-    token = create_access_token({"user_id": user_id, "role": req.role, "tenant_id": req.tenant_id})
+    token = create_access_token({"user_id": user_id, "role": role, "tenant_id": req.tenant_id})
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {"id": user_id, "name": req.name, "email": email, "role": req.role, "tenant_id": req.tenant_id},
+        "user": {"id": user_id, "name": req.name, "email": email, "role": role, "tenant_id": req.tenant_id},
     }
 
 
 @app.post("/api/auth/login")
-def login_user(req: LoginRequest):
+def login_user(req: LoginRequest, request: Request):
     email = str(req.email).lower()
+    ip = client_ip(request)
+    # Lockout is keyed on (account, client address) so a stranger cannot lock a victim out, and a separate
+    # per-address cap limits password spraying across many accounts.
+    lock_key = f"{email}|{ip}"
 
-    # Rate limiting / brute force defense (sliding window: max 5 failures per 5 minutes)
-    is_locked, remaining_secs = check_login_rate_limit(email)
+    is_locked, remaining_secs = check_login_rate_limit(lock_key)
+    if not is_locked and limiter.over("login_ip", ip):
+        is_locked, remaining_secs = True, 60
     if is_locked:
         AuditLedger.append_event(
             event_type="auth_rate_limit_exceeded",
@@ -556,14 +623,17 @@ def login_user(req: LoginRequest):
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
 
-    if not row or not verify_password(req.password, row["password_hash"]):
-        record_failed_login(email)
+    # Always run one password hash so an unknown email takes as long as a wrong password.
+    password_ok = verify_password(req.password, row["password_hash"] if row else DUMMY_PASSWORD_HASH)
+    if not row or not password_ok:
+        record_failed_login(lock_key)
+        limiter.allow("login_ip", ip)
         now = now_utc_iso()
         try:
             with get_connection() as conn:
                 conn.execute(
                     "INSERT INTO login_attempts (id, identifier, attempted_at, success, ip_address) VALUES (?, ?, ?, ?, ?)",
-                    (f"att_{uuid.uuid4().hex[:12]}", email, now, 0, "127.0.0.1"),
+                    (f"att_{uuid.uuid4().hex[:12]}", email, now, 0, ip),
                 )
         except Exception:
             pass
@@ -579,13 +649,13 @@ def login_user(req: LoginRequest):
         )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
-    reset_failed_logins(email)
+    reset_failed_logins(lock_key)
     now = now_utc_iso()
     try:
         with get_connection() as conn:
             conn.execute(
                 "INSERT INTO login_attempts (id, identifier, attempted_at, success, ip_address) VALUES (?, ?, ?, ?, ?)",
-                (f"att_{uuid.uuid4().hex[:12]}", email, now, 1, "127.0.0.1"),
+                (f"att_{uuid.uuid4().hex[:12]}", email, now, 1, ip),
             )
     except Exception:
         pass
@@ -617,8 +687,8 @@ def get_me(user: dict[str, Any] = Depends(get_current_user)):
 # --- Client / Tenant Management ---
 @app.post("/api/clients", status_code=status.HTTP_201_CREATED)
 def create_client(req: CreateClientRequest, user: dict[str, Any] = Depends(get_current_user)):
-    if user["role"] not in {"system_admin", "client_admin"}:
-        raise HTTPException(status_code=403, detail="Only administrators can onboard new client tenants")
+    if user["role"] != "system_admin":
+        raise HTTPException(status_code=403, detail="Only the platform administrator can onboard new client tenants")
 
     client_id = req.client_id.strip().lower()
     now = now_utc_iso()
@@ -684,6 +754,7 @@ def add_client_member(client_id: str, req: AddMemberRequest, user: dict[str, Any
 
 @app.get("/api/clients/{client_id}/members")
 def list_client_members(client_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    require_admin(user)  # employees must not enumerate colleagues' names and emails
     if user["tenant_id"] != client_id and user["role"] != "system_admin":
         raise HTTPException(status_code=403, detail="Access to other tenant member lists is prohibited")
     with get_connection() as conn:
@@ -701,6 +772,7 @@ async def upload_document(
         raise HTTPException(status_code=403, detail="Forbidden: Document upload requires administrator privileges")
     if user["tenant_id"] != client_id and user["role"] != "system_admin":
         raise HTTPException(status_code=403, detail="Cannot upload documents to another tenant's repository")
+    throttle("upload", user["id"])
 
     content_type = request.headers.get("content-type", "")
     if "multipart/form-data" in content_type:
@@ -709,7 +781,7 @@ async def upload_document(
         file = form.get("file")
         if not file:
             raise HTTPException(status_code=400, detail="File must be uploaded in form-data")
-        content_bytes = await file.read()
+        content_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
         filename = getattr(file, "filename", "uploaded_doc.txt")
         doc_title = str(title) if title else filename
     else:
@@ -719,6 +791,8 @@ async def upload_document(
         content = body.get("content", "")
         content_bytes = content.encode("utf-8") if isinstance(content, str) else b""
 
+    if len(content_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File exceeds the {MAX_UPLOAD_BYTES} byte upload limit")
     result = DocumentService.ingest_document(
         tenant_id=client_id,
         user_id=user["id"],
@@ -758,13 +832,14 @@ async def replace_document_version(
 ):
     if user["role"] not in {"system_admin", "client_admin"}:
         raise HTTPException(status_code=403, detail="Forbidden: Version replacement requires administrator privileges")
+    throttle("upload", user["id"])
     content_type = request.headers.get("content-type", "")
     if "multipart/form-data" in content_type:
         form = await request.form()
         file = form.get("file")
         if not file:
             raise HTTPException(status_code=400, detail="File must be provided")
-        content_bytes = await file.read()
+        content_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
         filename = getattr(file, "filename", "updated_version.txt")
     else:
         body = await request.json()
@@ -772,6 +847,8 @@ async def replace_document_version(
         content = body.get("content", "")
         content_bytes = content.encode("utf-8") if isinstance(content, str) else b""
 
+    if len(content_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File exceeds the {MAX_UPLOAD_BYTES} byte upload limit")
     try:
         result = DocumentService.replace_version(
             doc_id=document_id,
@@ -848,6 +925,7 @@ def chat_query(req: ChatQueryRequest, user: dict[str, Any] = Depends(get_current
     Routes queries through lightweight in-process SOP knowledge graph.
     Logs persistent session and interaction metrics in SQLite.
     """
+    throttle("chat", user["id"])
     from session_tracker import SessionTracker
     actual_session_id = SessionTracker.ensure_user_session(req.session_id, user["id"])
 
@@ -1056,8 +1134,8 @@ def verify_audit_ledger(user: dict[str, Any] = Depends(get_current_user)):
 @app.post("/api/audit/tamper-test")
 def simulate_tamper_attack(req: TamperTestRequest, user: dict[str, Any] = Depends(get_current_user)):
     """Simulate a tamper attack on the audit ledger to demonstrate detection."""
-    if user["role"] not in {"system_admin", "client_admin"}:
-        raise HTTPException(status_code=403, detail="Forbidden: Tamper simulation requires administrator privileges")
+    if user["role"] != "system_admin":
+        raise HTTPException(status_code=403, detail="Forbidden: Tamper simulation requires the platform administrator")
     result = AuditLedger.tamper_for_demo(sequence=req.sequence)
     AuditLedger.append_event(
         event_type="tamper_attack_simulated",
@@ -1066,14 +1144,14 @@ def simulate_tamper_attack(req: TamperTestRequest, user: dict[str, Any] = Depend
         resource_id="audit_ledger",
         action="tamper_test",
         decision="executed",
-        details={"tampered_sequence": result.get("tampered_sequence")},
+        details={"tampered_sequence": result.get("tampered_sequence"), "simulated": True},
     )
     return result
 
 
 # --- TEE Simulation (Section 6) ---
 @app.get("/api/security/tee-status")
-def get_tee_status():
+def get_tee_status(user: dict[str, Any] = Depends(get_current_user)):
     return TeeService.get_status()
 
 
@@ -1089,6 +1167,7 @@ def verify_tee_attestation(req: TeeVerifyRequest, user: dict[str, Any] = Depends
 # --- Admin & NLP / Security Hub ---
 @app.get("/api/admin/nlp-stats")
 def get_nlp_stats(user: dict[str, Any] = Depends(get_current_user)):
+    require_admin(user)
     from vector_store import InMemoryVectorDB
     return InMemoryVectorDB.get_instance().get_status()
 
@@ -1125,13 +1204,15 @@ def train_intent_beautification_api(user: dict[str, Any] = Depends(get_current_u
 
 # --- Trust View Graph & Session Diagnostics ---
 @app.get("/api/graph/stats")
-def get_graph_stats():
+def get_graph_stats(user: dict[str, Any] = Depends(get_current_user)):
+    require_admin(user)
     from sop_graph import SOPKnowledgeGraph
     return SOPKnowledgeGraph.get_instance().get_stats()
 
 
 @app.get("/api/admin/interaction-metrics")
 def get_interaction_metrics(user: dict[str, Any] = Depends(get_current_user)):
+    require_admin(user)
     from session_tracker import SessionTracker
     return SessionTracker.get_summary_metrics()
 
@@ -1251,4 +1332,4 @@ def get_security_matrix(user: dict[str, Any] = Depends(get_current_user)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+    uvicorn.run(app, host=os.getenv("HOST", "127.0.0.1"), port=int(os.getenv("PORT", "8000")))

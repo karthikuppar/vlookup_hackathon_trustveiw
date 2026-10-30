@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 from crypto_utils import now_utc_iso, sha256_digest
 from database import get_connection
+from injection_guard import strip_injection
 from ledger_engine import AuditLedger
 
 try:
@@ -151,6 +152,20 @@ def extract_text_from_bytes(content: bytes, filename: str) -> tuple[list[dict[st
     return chunks, None
 
 
+def sanitize_chunks(chunks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Drop instruction-like sentences from chunks. Returns (clean_chunks, number_of_chunks_that_contained_any)."""
+    clean, flagged = [], 0
+    for c in chunks:
+        text, removed = strip_injection(c["text"])
+        section, sec_removed = strip_injection(c.get("section") or "")
+        if removed or sec_removed:
+            flagged += 1
+        if not text.strip():
+            continue  # the whole chunk was injection text
+        clean.append({**c, "text": text, "section": section.strip() or "Section 1", "token_count": len(text.split())})
+    return clean, flagged
+
+
 class DocumentService:
     @staticmethod
     def ingest_document(
@@ -188,6 +203,11 @@ class DocumentService:
         now = now_utc_iso()
         digest = f"sha256:{sha256_digest(content_bytes)}"
         chunks, error = extract_text_from_bytes(content_bytes, filename)
+        injection_flagged_chunks = 0
+        if not error:
+            chunks, injection_flagged_chunks = sanitize_chunks(chunks)
+            if not chunks:
+                error = "Document contained no usable text after removing instruction-like content"
 
         status = "failed" if error else "active"
         version_id = f"ver_{uuid.uuid4().hex[:12]}"
@@ -235,6 +255,7 @@ class DocumentService:
                 "status": status,
                 "chunks_count": len(chunks),
                 "error": error,
+                "injection_flagged_chunks": injection_flagged_chunks,
             },
         )
 
@@ -259,6 +280,7 @@ class DocumentService:
             "status": status,
             "chunks_count": len(chunks),
             "error": error,
+            "injection_flagged_chunks": injection_flagged_chunks,
             "transparency": transparency,
         }
 
@@ -295,6 +317,11 @@ class DocumentService:
         now = now_utc_iso()
         digest = f"sha256:{sha256_digest(content_bytes)}"
         chunks, error = extract_text_from_bytes(content_bytes, filename)
+        injection_flagged_chunks = 0
+        if not error:
+            chunks, injection_flagged_chunks = sanitize_chunks(chunks)
+            if not chunks:
+                error = "Document contained no usable text after removing instruction-like content"
         status = "failed" if error else "active"
 
         with get_connection() as conn:
@@ -353,6 +380,7 @@ class DocumentService:
                 "content_digest": digest,
                 "status": status,
                 "error": error,
+                "injection_flagged_chunks": injection_flagged_chunks,
             },
         )
 
@@ -375,6 +403,7 @@ class DocumentService:
             "status": status,
             "chunks_count": len(chunks),
             "error": error,
+            "injection_flagged_chunks": injection_flagged_chunks,
             "transparency": transparency,
         }
 

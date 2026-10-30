@@ -161,3 +161,7 @@ def decode_refresh_token(token: str) -> Optional[dict]:
         return payload
     except JWTError:
         return None
+
+
+# Verified against when the account does not exist, so unknown emails cost the same as wrong passwords.
+DUMMY_PASSWORD_HASH = hash_password("timing-equaliser-not-a-real-password")

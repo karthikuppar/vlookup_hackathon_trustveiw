@@ -65,6 +65,21 @@ def tokenize(text: str) -> list[str]:
     return [t for t in tokens if len(t) > 2 and t not in STOP_WORDS]
 
 
+def _drop_injection_text(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove instruction-like sentences from candidate chunks so they can never be quoted in an answer."""
+    from injection_guard import strip_injection
+    clean = []
+    for c in chunks:
+        text, removed = strip_injection(c.get("text") or "")
+        section, sec_removed = strip_injection(c.get("section") or "")
+        if removed or sec_removed:
+            if not text.strip():
+                continue
+            c = {**c, "text": text, "section": section.strip() or "Section 1"}
+        clean.append(c)
+    return clean
+
+
 def compute_chunk_relevance(query_tokens: list[str], chunk_text: str) -> float:
     """
     Compute BM25-style lexical relevance of a chunk against expanded query tokens.
@@ -393,7 +408,10 @@ class RetrievalEngine:
 
         # Unauthorized document extraction probe defense
         if intent == "cross_tenant_probe":
-            unauthorized = [t for t in ["tenant_b", "betashield"] if t not in permitted_tenants]
+            # Any tenant this user cannot read (not a hardcoded demo name) makes an extraction probe a violation.
+            with get_connection() as conn:
+                all_tenants = [r["id"] for r in conn.execute("SELECT id FROM tenants WHERE id != 'system'").fetchall()]
+            unauthorized = [t for t in all_tenants if t not in permitted_tenants]
             if unauthorized:
                 AuditLedger.append_event(
                     event_type="unauthorized_access_denied",
@@ -492,6 +510,8 @@ class RetrievalEngine:
             with get_connection() as conn:
                 rows = conn.execute(sql, permitted_tenants).fetchall()
             fallback_pool = [dict(r) for r in rows]
+        # Defence in depth for chunks stored before ingestion-time filtering existed.
+        fallback_pool = _drop_injection_text(fallback_pool)
 
         generic_fillers = {"policy", "procedure", "guideline", "sop", "standard", "rules", "tell", "what", "how", "give", "show", "our", "the", "bring"}
 

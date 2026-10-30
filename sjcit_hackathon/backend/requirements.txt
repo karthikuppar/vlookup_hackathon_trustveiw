@@ -5,3 +5,7 @@ bcrypt==4.0.1
 pydantic[email]
 httpx
 pypdf
+numpy
+scikit-learn
+# Optional: enables the BAAI/bge-small-en semantic embeddings. Without it embedding_manager falls back to TF-IDF/SVD.
+# sentence-transformers
