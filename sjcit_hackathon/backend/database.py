@@ -138,4 +138,23 @@ def init_db():
             citation_ids TEXT NOT NULL,
             session_id TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS unresolved_queries (
+            id TEXT PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            query_text TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            detected_tokens TEXT,
+            suggested_intent TEXT,
+            status TEXT DEFAULT 'pending_training'
+        );
+
+        CREATE TABLE IF NOT EXISTS dynamic_intent_prompts (
+            id TEXT PRIMARY KEY,
+            query_pattern TEXT NOT NULL UNIQUE,
+            mapped_intent TEXT NOT NULL,
+            expansion_text TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         """)

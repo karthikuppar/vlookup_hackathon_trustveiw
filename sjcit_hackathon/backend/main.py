@@ -653,6 +653,14 @@ async def replace_document_version(
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@app.get("/api/documents/{document_id}/transparency")
+def get_document_transparency_api(document_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    data = DocumentService.get_document_transparency(document_id, user["tenant_id"])
+    if not data:
+        raise HTTPException(status_code=404, detail="Document not found or unauthorized")
+    return data
+
+
 # --- Explicit Knowledge Sharing (Section 4) ---
 @app.post("/api/knowledge-bases/{kb_id}/shares", status_code=status.HTTP_201_CREATED)
 def create_share_grant(kb_id: str, req: CreateShareRequest, user: dict[str, Any] = Depends(get_current_user)):
@@ -769,6 +777,22 @@ def reindex_vectors(user: dict[str, Any] = Depends(get_current_user)):
     status = InMemoryVectorDB.get_instance().get_status()
     status["reindex_time_ms"] = elapsed_ms
     return status
+
+
+@app.get("/api/admin/unresolved-queries")
+def get_unresolved_queries_api(user: dict[str, Any] = Depends(get_current_user)):
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin privilege required")
+    from nlp_prompts import get_unresolved_queries_report
+    return get_unresolved_queries_report()
+
+
+@app.post("/api/admin/train-intent-beautification")
+def train_intent_beautification_api(user: dict[str, Any] = Depends(get_current_user)):
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden: Admin privilege required")
+    from nlp_prompts import train_unresolved_queries
+    return train_unresolved_queries()
 
 
 @app.get("/api/admin/security-matrix")

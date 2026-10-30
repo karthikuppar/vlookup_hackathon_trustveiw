@@ -22,6 +22,7 @@ from ledger_engine import AuditLedger
 from nlp_prompts import (
     classify_user_intent,
     enrich_tokens_with_intent_and_synonyms,
+    log_unresolved_query,
     normalize_query_text,
 )
 from response_synthesizer import (
@@ -366,6 +367,10 @@ class RetrievalEngine:
 
         # 3.1 Insufficient Evidence
         if not deduped:
+            try:
+                log_unresolved_query(question, user_id, user_tenant_id)
+            except Exception:
+                pass
             answer_text = build_insufficient_evidence_response(question)
             AuditLedger.append_event(
                 event_type="chat_query_processed",
