@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.hx/
+ps04_data/
+tests/
+docs/
+.git
