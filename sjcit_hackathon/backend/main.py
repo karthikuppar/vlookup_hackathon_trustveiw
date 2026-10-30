@@ -35,12 +35,16 @@ app = FastAPI(
     description="Offline-capable, tenant-isolated document-grounded chatbot with blockchain-lite audit and TEE simulation.",
 )
 
+# Credentialed CORS must name its origins: "*" with allow_credentials reflects any caller's Origin.
+# Defaults cover the Vite dev server; set AEGIS_CORS_ORIGINS (comma-separated) for a real deployment.
+_CORS_ORIGINS = [o.strip() for o in os.getenv(
+    "AEGIS_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 

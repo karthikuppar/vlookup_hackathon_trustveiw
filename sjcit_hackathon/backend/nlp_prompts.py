@@ -14,6 +14,7 @@ import uuid
 from typing import Any
 from crypto_utils import now_utc_iso
 from database import get_connection
+from injection_guard import is_injection
 
 # ---------------------------------------------------------------------------
 # 1. Typo & Spelling Normalization Map
@@ -342,7 +343,7 @@ INTENT_SIGNALS = {
     },
     "prompt_injection_probe": {
         "ignore previous", "disregard instructions", "system prompt", "dan mode",
-        "bypass", "jailbreak", "override", "reveal secret", "sudo",
+        "jailbreak", "reveal secret", "sudo",
     },
 }
 
@@ -444,9 +445,10 @@ def classify_user_intent_with_confidence(query: str) -> tuple[str, float, bool, 
         return target_intent, 0.99, False, [target_intent]
 
     # 2. Security Injection Probes (Hard Gate, 100% confidence)
-    for sig in INTENT_SIGNALS["prompt_injection_probe"]:
-        if sig in q_lower:
-            return "prompt_injection_probe", 1.0, False, ["prompt_injection_probe"]
+    # The pattern-based guard normalises obfuscation (zero-width, homoglyphs, leetspeak) first; the legacy
+    # substring list stays as a second net.
+    if is_injection(query) or any(sig in q_lower for sig in INTENT_SIGNALS["prompt_injection_probe"]):
+        return "prompt_injection_probe", 1.0, False, ["prompt_injection_probe"]
 
     # 3. Cross-Tenant Extraction Probes (Hard Gate, 100% confidence)
     for sig in INTENT_SIGNALS["cross_tenant_probe"]:
