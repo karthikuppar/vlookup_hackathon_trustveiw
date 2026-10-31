@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from . import security
 from .answer import answer_question, is_injection
 from .audit import Ledger, now
+from .guard import RateLimiter
 from .config import Settings
 from .db import connect, init_db, tx
 from .ingest import IngestRejected, ingest_version
@@ -91,9 +92,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     report = tee.attest()
     ledger_key = tee.release_key("ledger-checkpoint", report, tee.measurement())
     ledger = Ledger(settings.data_dir / "audit_checkpoints.jsonl", ledger_key, settings.checkpoint_every)
+    # Same PBKDF2 cost as real accounts, so an unknown email takes as long as a wrong password.
+    dummy_hash = security.hash_password("dummy-password", settings.pbkdf2_iterations)
+    limiter = RateLimiter({"chat": (30, 60), "upload": (20, 60)})
 
     app = FastAPI(title="PS-04 Secure Multi-Client Knowledge Chatbot")
     app.state.settings, app.state.ledger, app.state.db_path, app.state.tee = settings, ledger, db_path, tee
+    app.state.dummy_hash, app.state.limiter = dummy_hash, limiter
 
     @app.middleware("http")
     async def headers(request: Request, call_next):
@@ -101,6 +106,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         resp.headers["Content-Security-Policy"] = "default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'"
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
+        resp.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        resp.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         return resp
 
     def get_conn():
@@ -123,7 +133,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def deny(conn, user, what, tid=None):
         with tx(conn):
-            ledger.append(conn, "access.denied", actor=user["id"], resource=what, attempted_tenant=tid)
+            # counterparty = the tenant that was targeted, so its administrators can see probing against it
+            ledger.append(conn, "access.denied", actor=user["id"], counterparty=tid, resource=what, attempted_tenant=tid)
         raise HTTPException(404, "Not found")
 
     def role_in(conn, user, tid) -> str | None:
@@ -137,6 +148,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             deny(conn, user, "tenant", tid)
         return role
 
+    def throttle(bucket, user):
+        if not limiter.allow(bucket, user["id"]):
+            raise HTTPException(429, "Rate limit exceeded; slow down and retry shortly")
+
     def sysadmin(user):
         if not user["is_sysadmin"]:
             raise HTTPException(403, "System administrator required")
@@ -147,23 +162,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True}
 
     @app.post("/auth/login")
-    def login(body: LoginIn, conn=Depends(get_conn)):
+    def login(body: LoginIn, request: Request, conn=Depends(get_conn)):
+        # Lockout is per (account, client address): a stranger cannot lock a victim out by guessing wrong
+        # passwords from elsewhere. A wider per-address cap bounds password spraying across many accounts.
+        # The address is the socket peer; X-Forwarded-For is deliberately not trusted (it is client-controlled).
         email = body.email.strip().lower()
+        ip = request.client.host if request.client else "unknown"
+        key, ipkey = f"{email}|{ip}", f"ip|{ip}"
         t = time.time()
-        recent = conn.execute("SELECT COUNT(*) FROM login_failures WHERE email=? AND at>?", (email, t - settings.lockout_seconds)).fetchone()[0]
+        recent = conn.execute("SELECT COUNT(*) FROM login_failures WHERE email=? AND at>?", (key, t - settings.lockout_seconds)).fetchone()[0]
+        ip_recent = conn.execute("SELECT COUNT(*) FROM login_failures WHERE email=? AND at>?", (ipkey, t - settings.lockout_seconds)).fetchone()[0]
+        locked = recent >= settings.max_failed_logins or ip_recent >= settings.max_failed_logins * 4
         user = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-        ok = security.verify_password(body.password, user["password_hash"] if user else security.DUMMY_HASH)
+        ok = security.verify_password(body.password, user["password_hash"] if user else dummy_hash)
         who = hashlib.sha256(email.encode()).hexdigest()[:16]
-        if recent >= settings.max_failed_logins or not (user and ok and user["status"] == "active"):
+        if locked or not (user and ok and user["status"] == "active"):
             with tx(conn):
-                if recent < settings.max_failed_logins:
-                    conn.execute("INSERT INTO login_failures VALUES(?,?)", (email, t))
-                ledger.append(conn, "auth.login_failed", actor=None, email_sha256=who, locked=recent >= settings.max_failed_logins)
-            raise HTTPException(429 if recent >= settings.max_failed_logins else 401,
-                                "Too many attempts; try later" if recent >= settings.max_failed_logins else "Invalid credentials")
+                if not locked:
+                    conn.execute("INSERT INTO login_failures VALUES(?,?)", (key, t))
+                    conn.execute("INSERT INTO login_failures VALUES(?,?)", (ipkey, t))
+                ledger.append(conn, "auth.login_failed", actor=None, email_sha256=who, locked=locked)
+            raise HTTPException(429 if locked else 401, "Too many attempts; try later" if locked else "Invalid credentials")
         sid = uuid.uuid4().hex
         with tx(conn):
-            conn.execute("DELETE FROM login_failures WHERE email=?", (email,))
+            conn.execute("DELETE FROM login_failures WHERE email=?", (key,))
             conn.execute("INSERT INTO sessions VALUES(?,?,?,0)", (sid, user["id"], t + settings.token_ttl))
             ledger.append(conn, "auth.login", actor=user["id"])
         return {"token": security.issue_token(settings.secret, sid, settings.token_ttl), "expires_in": settings.token_ttl}
@@ -301,6 +323,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return data
 
     def do_ingest(conn, user, tid, file, title=None, document_id=None):
+        throttle("upload", user)
         data = read_upload(file)
         try:
             res = ingest_version(conn, ledger, settings, tenant_id=tid, user_id=user["id"], filename=file.filename or "", data=data, title=title, document_id=document_id)
@@ -378,6 +401,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/tenants/{tid}/chat")
     def chat(tid: str, body: ChatIn, user=Depends(current_user), conn=Depends(get_conn)):
         member(conn, user, tid)
+        throttle("chat", user)
         cid = body.conversation_id
         if cid and not conn.execute("SELECT 1 FROM conversations WHERE id=? AND tenant_id=? AND user_id=?", (cid, tid, user["id"])).fetchone():
             deny(conn, user, "conversation", tid)
@@ -416,8 +440,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         member(conn, user, tid)
         if not conn.execute("SELECT 1 FROM conversations WHERE id=? AND tenant_id=? AND user_id=?", (cid, tid, user["id"])).fetchone():
             deny(conn, user, "conversation", tid)
-        return [dict(r) | {"citations": json.loads(r["citations"] or "[]")}
-                for r in conn.execute("SELECT role, content, outcome, citations, created_at FROM messages WHERE conversation_id=? ORDER BY created_at", (cid,))]
+        out = []
+        for r in conn.execute("SELECT role, content, outcome, citations, created_at FROM messages WHERE conversation_id=? ORDER BY created_at", (cid,)):
+            m = dict(r) | {"citations": json.loads(r["citations"] or "[]")}
+            # History must not outlive access: if a shared source was revoked, expired or its owner suspended,
+            # the stored answer and quotes derived from it are withheld.
+            if any(c.get("shared_from") and not still_visible(conn, tid, c["document_id"]) for c in m["citations"]):
+                m.update(content="[Content withheld: access to a shared source has been revoked or has expired.]", citations=[], outcome="redacted")
+            out.append(m)
+        return out
+
+    def still_visible(conn, tid, did) -> bool:
+        return bool(conn.execute(f"""SELECT 1 FROM documents d JOIN document_versions v ON v.document_id=d.id AND v.is_current=1 AND v.status='ready'
+                                     WHERE d.id=:did AND {VISIBLE}""", {"did": did, "tid": tid, "now": now()}).fetchone())
 
     # ------------------------------------------------------------------- sharing
     @app.post("/tenants/{tid}/shares", status_code=201)

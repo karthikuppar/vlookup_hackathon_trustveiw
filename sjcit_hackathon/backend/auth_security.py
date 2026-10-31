@@ -83,6 +83,35 @@ def reset_failed_logins(identifier: str) -> None:
     _failed_attempts.pop(identifier_clean, None)
 
 
+COMMON_WEAK_PASSWORDS = {
+    "password1234", "password12345", "123456789012", "qwertyuiop12", "administrator1",
+    "admin1234567", "welcome12345", "changeme1234", "trustview123", "letmein12345",
+    "iloveyou1234", "passphrase123", "defaultpass12", "aegiskb12345", "supersecret12"
+}
+
+
+def validate_password_policy(password: str, email: str | None = None) -> None:
+    """Enforces strict password policy (Roadmap 1.4):
+    - Minimum length of 12 characters
+    - Not identical to email or containing user handle
+    - Not in offline common weak password blacklist
+    """
+    if not password or len(password) < 12:
+        raise ValueError("Password policy violation: Password must be at least 12 characters long.")
+
+    clean_pwd = str(password).strip().lower()
+    if email:
+        clean_email = str(email).strip().lower()
+        if clean_pwd == clean_email:
+            raise ValueError("Password policy violation: Password cannot be identical to email address.")
+        user_handle = clean_email.split("@")[0]
+        if len(user_handle) >= 3 and user_handle in clean_pwd:
+            raise ValueError("Password policy violation: Password cannot contain email username.")
+
+    if clean_pwd in COMMON_WEAK_PASSWORDS:
+        raise ValueError("Password policy violation: Password is too common. Please select a stronger password.")
+
+
 def _normalize_password(password: str) -> str:
     if password is None:
         return ""
@@ -126,17 +155,28 @@ def password_needs_rehash(hashed_password: str) -> bool:
 
 
 def create_access_token(data: dict, expires_minutes: int = ACCESS_TOKEN_EXPIRE_MINUTES) -> str:
+    import uuid
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(minutes=expires_minutes)
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=expires_minutes)
+    if "jti" not in to_encode:
+        to_encode["jti"] = f"tok_{uuid.uuid4().hex}"
+    to_encode.setdefault("iat", now.timestamp())
     to_encode.update({"exp": expire, "type": "access"})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def create_refresh_token(data: dict, expires_days: int = REFRESH_TOKEN_EXPIRE_DAYS) -> str:
+    import uuid
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(days=expires_days)
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(days=expires_days)
+    if "jti" not in to_encode:
+        to_encode["jti"] = f"rtk_{uuid.uuid4().hex}"
+    to_encode.setdefault("iat", now.timestamp())
     to_encode.update({"exp": expire, "type": "refresh"})
     return jwt.encode(to_encode, REFRESH_SECRET_KEY, algorithm=ALGORITHM)
+
 
 
 def decode_access_token(token: str) -> Optional[dict]:
@@ -161,3 +201,39 @@ def decode_refresh_token(token: str) -> Optional[dict]:
         return payload
     except JWTError:
         return None
+
+
+def blacklist_token(jti: str, user_id: str, token_type: str = "access", expires_at: str | None = None, reason: str = "logout") -> None:
+    """Store revoked token identifier in database blacklist."""
+    from database import get_connection
+    from crypto_utils import now_utc_iso
+    now = now_utc_iso()
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO token_blacklist (jti, user_id, token_type, expires_at, revoked_at, reason) VALUES (?, ?, ?, ?, ?, ?)",
+            (jti, user_id, token_type, expires_at or now, now, reason),
+        )
+
+
+def is_token_blacklisted(jti: str) -> bool:
+    """Check if token identifier has been revoked."""
+    if not jti:
+        return False
+    from database import get_connection
+    with get_connection() as conn:
+        row = conn.execute("SELECT jti FROM token_blacklist WHERE jti = ?", (jti,)).fetchone()
+        return row is not None
+
+
+def revoke_all_user_tokens(user_id: str) -> None:
+    """Revoke all current tokens for a user by setting tokens_revoked_before timestamp."""
+    from database import get_connection
+    from crypto_utils import now_utc_iso
+    now = now_utc_iso()
+    with get_connection() as conn:
+        conn.execute("UPDATE users SET tokens_revoked_before = ? WHERE id = ?", (now, user_id))
+
+
+
+# Verified against when the account does not exist, so unknown emails cost the same as wrong passwords.
+DUMMY_PASSWORD_HASH = hash_password("timing-equaliser-not-a-real-password")

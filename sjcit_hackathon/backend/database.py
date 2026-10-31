@@ -44,8 +44,22 @@ def init_db():
             role TEXT NOT NULL, -- system_admin, client_admin, client_employee
             tenant_id TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            tokens_revoked_before TEXT,
+            must_change_password INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
         );
+
+        CREATE TABLE IF NOT EXISTS token_blacklist (
+            jti TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            token_type TEXT NOT NULL, -- access, refresh
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT NOT NULL,
+            reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_token_blacklist_user ON token_blacklist(user_id);
+
 
         CREATE TABLE IF NOT EXISTS documents (
             id TEXT PRIMARY KEY,
@@ -114,7 +128,8 @@ def init_db():
             decision TEXT NOT NULL,
             payload_digest TEXT NOT NULL,
             prev_hash TEXT NOT NULL,
-            entry_hash TEXT NOT NULL
+            entry_hash TEXT NOT NULL,
+            details_json TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_audit_seq ON audit_events(sequence);
 
@@ -306,4 +321,73 @@ def init_db():
             ip_address TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_login_attempts_ident ON login_attempts(identifier, attempted_at);
+
+        -- Security Testing, Vulnerability Assessment & Remediation Centre
+        CREATE TABLE IF NOT EXISTS security_scans (
+            id TEXT PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            status TEXT NOT NULL DEFAULT 'RUNNING',
+            total_tests INTEGER NOT NULL DEFAULT 0,
+            passed_tests INTEGER NOT NULL DEFAULT 0,
+            failed_tests INTEGER NOT NULL DEFAULT 0,
+            critical_count INTEGER NOT NULL DEFAULT 0,
+            high_count INTEGER NOT NULL DEFAULT 0,
+            medium_count INTEGER NOT NULL DEFAULT 0,
+            low_count INTEGER NOT NULL DEFAULT 0,
+            scope TEXT NOT NULL DEFAULT 'FULL_ASSESSMENT',
+            duration_seconds REAL DEFAULT 0.0,
+            execution_log TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_scans_date ON security_scans(started_at DESC);
+
+        CREATE TABLE IF NOT EXISTS security_findings (
+            id TEXT PRIMARY KEY,
+            scan_id TEXT NOT NULL,
+            test_case_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            category TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            risk_score REAL NOT NULL,
+            affected_component TEXT NOT NULL,
+            affected_file TEXT,
+            root_cause TEXT NOT NULL,
+            potential_impact TEXT NOT NULL,
+            recommended_remediation TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'OPEN',
+            evidence_json TEXT,
+            detected_at TEXT NOT NULL,
+            resolved_at TEXT,
+            FOREIGN KEY(scan_id) REFERENCES security_scans(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_findings_scan ON security_findings(scan_id, severity, status);
+
+        CREATE TABLE IF NOT EXISTS security_remediations (
+            id TEXT PRIMARY KEY,
+            finding_id TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            proposed_patch TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PROPOSED',
+            requires_approval INTEGER NOT NULL DEFAULT 0,
+            applied_at TEXT,
+            verified_at TEXT,
+            rollback_patch TEXT,
+            remediation_notes TEXT,
+            FOREIGN KEY(finding_id) REFERENCES security_findings(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_remediations_finding ON security_remediations(finding_id, status);
         """)
+        # Migration: older databases lack the column that lets verify() recompute each payload digest.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(audit_events)").fetchall()}
+        if "details_json" not in cols:
+            conn.execute("ALTER TABLE audit_events ADD COLUMN details_json TEXT")
+
+        # Migration: ensure users table has lifecycle columns
+        user_cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "is_active" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+        if "tokens_revoked_before" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN tokens_revoked_before TEXT")
+        if "must_change_password" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+

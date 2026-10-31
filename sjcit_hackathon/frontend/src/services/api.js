@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { getAppMode, getToken, setToken, setRole } from './session'
 import { analyzeResponseOffline, generateExplanationOffline } from '@/utils/offlineEngine'
 import {
   getBoardSyllabusCatalog,
@@ -47,7 +48,7 @@ async function getCachedSyllabusRequest(cacheKey, request) {
 
 // ─── Request interceptor (attach auth token when available) ──────────────────
 client.interceptors.request.use((config) => {
-  const appMode = localStorage.getItem('appMode')
+  const appMode = getAppMode()
   
   // Exclude health and auth routes from offline block
   const isAuthRoute = config.url.includes('/health') || config.url.includes('/auth/')
@@ -56,7 +57,7 @@ client.interceptors.request.use((config) => {
     return Promise.reject(new Error('OFFLINE_MODE_BLOCK'))
   }
 
-  const token = localStorage.getItem('access_token')
+  const token = getToken()
   if (token) {
     config.headers['Authorization'] = `Bearer ${token}`
   }
@@ -83,9 +84,11 @@ client.interceptors.response.use(
 // ─── Hybrid Auth Methods ──────────────────────────────────────────────────────
 
 export async function hybridRegister(payload) {
-  const { data } = await authClient.post('/auth/register', payload)
+  // The server forces the role; never send one.
+  const { role, ...safePayload } = payload || {}
+  const { data } = await authClient.post('/auth/register', safePayload)
   if (data.success && data.data?.access_token) {
-    localStorage.setItem('access_token', data.data.access_token)
+    setToken(data.data.access_token)
   }
   return data
 }
@@ -93,7 +96,7 @@ export async function hybridRegister(payload) {
 export async function hybridLogin(email, password) {
   const { data } = await authClient.post('/auth/login', { email, password })
   if (data.success && data.data?.access_token) {
-    localStorage.setItem('access_token', data.data.access_token)
+    setToken(data.data.access_token)
   }
   return data
 }
@@ -109,7 +112,7 @@ function getLocalStudentEmail(student) {
 }
 
 export async function syncLocalUserToBackend(student) {
-  const appMode = localStorage.getItem('appMode')
+  const appMode = getAppMode()
   if (appMode !== 'online' || !student?.id) return
 
   const email = getLocalStudentEmail(student)
@@ -123,8 +126,8 @@ export async function syncLocalUserToBackend(student) {
     
     let res = null
     try {
-      res = await authClient.post('/auth/login', { email, password })
-    } catch (e) {
+      res = await authClient.post('/auth/login', { email, password: passwords[0] })
+    } catch {
       // Login failed, try register
     }
 
@@ -135,8 +138,7 @@ export async function syncLocalUserToBackend(student) {
       res = await authClient.post('/auth/register', {
         name: student.name,
         email: email,
-        password: password,
-        role: 'student',
+        password: passwords[0],
         local_id: student.id,
         usn: email
       })
@@ -144,8 +146,8 @@ export async function syncLocalUserToBackend(student) {
     
     const token = res?.data?.data?.access_token || res?.data?.data?.token
     if (res?.data?.success && token) {
-      localStorage.setItem('access_token', token)
-      if (res.data.data?.role) localStorage.setItem('auth_role', res.data.data.role)
+      setToken(token)
+      if (res.data.data?.role) setRole(res.data.data.role)
     }
   })()
     .catch((err) => {
@@ -184,7 +186,7 @@ export async function analyzeResponseOnline(payload) {
 }
 
 export async function analyzeResponse(payload) {
-  const appMode = localStorage.getItem('appMode')
+  const appMode = getAppMode()
   if (typeof navigator !== 'undefined' && (!navigator.onLine || appMode === 'offline')) {
     return analyzeResponseOffline(payload)
   }
@@ -216,7 +218,7 @@ export async function generateExplanationOnline(payload) {
 }
 
 export async function generateExplanation(payload) {
-  const appMode = localStorage.getItem('appMode')
+  const appMode = getAppMode()
   if (typeof navigator !== 'undefined' && (!navigator.onLine || appMode === 'offline')) {
     return generateExplanationOffline(payload)
   }

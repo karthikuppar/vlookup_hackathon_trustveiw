@@ -219,31 +219,34 @@ class SessionTracker:
         return interaction_id
 
     @classmethod
-    def get_summary_metrics(cls) -> dict[str, Any]:
-        """Aggregate performance and retrieval path statistics."""
+    def get_summary_metrics(cls, tenant_id: str | None = None) -> dict[str, Any]:
+        """Aggregate performance and retrieval path statistics, optionally scoped by tenant."""
+        where_clause = " WHERE tenant_id = ?" if tenant_id else ""
+        params = (tenant_id,) if tenant_id else ()
+
         with get_connection() as conn:
             total_runs = conn.execute("SELECT COUNT(*) as c FROM application_runs").fetchone()["c"]
             active_run = conn.execute("SELECT * FROM application_runs WHERE run_id = ?", (cls.get_current_run_id(),)).fetchone()
 
-            total_interactions = conn.execute("SELECT COUNT(*) as c FROM interaction_logs").fetchone()["c"]
+            total_interactions = conn.execute(f"SELECT COUNT(*) as c FROM interaction_logs{where_clause}", params).fetchone()["c"]
             path_counts = conn.execute(
-                "SELECT retrieval_path, COUNT(*) as c FROM interaction_logs GROUP BY retrieval_path"
+                f"SELECT retrieval_path, COUNT(*) as c FROM interaction_logs{where_clause} GROUP BY retrieval_path", params
             ).fetchall()
             status_counts = conn.execute(
-                "SELECT result_status, COUNT(*) as c FROM interaction_logs GROUP BY result_status"
+                f"SELECT result_status, COUNT(*) as c FROM interaction_logs{where_clause} GROUP BY result_status", params
             ).fetchall()
             avg_latency = conn.execute(
-                "SELECT AVG(latency_ms) as avg_lat FROM interaction_logs"
+                f"SELECT AVG(latency_ms) as avg_lat FROM interaction_logs{where_clause}", params
             ).fetchone()["avg_lat"] or 0.0
 
             recent = conn.execute(
-                """
+                f"""
                 SELECT interaction_id, timestamp, user_id, intent, intent_confidence,
                        retrieval_path, candidate_count, result_status, latency_ms
-                FROM interaction_logs
+                FROM interaction_logs{where_clause}
                 ORDER BY timestamp DESC
                 LIMIT 20
-                """
+                """, params
             ).fetchall()
 
         return {
@@ -254,4 +257,5 @@ class SessionTracker:
             "retrieval_paths": {r["retrieval_path"]: r["c"] for r in path_counts},
             "result_statuses": {r["result_status"]: r["c"] for r in status_counts},
             "recent_interactions": [dict(r) for r in recent],
+            "scoped_tenant_id": tenant_id,
         }

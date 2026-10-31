@@ -14,6 +14,7 @@ import uuid
 from typing import Any
 from crypto_utils import now_utc_iso
 from database import get_connection
+from injection_guard import is_injection
 
 # ---------------------------------------------------------------------------
 # 1. Typo & Spelling Normalization Map
@@ -259,6 +260,15 @@ RICH_SYNONYMS: dict[str, list[str]] = {
     "onboarding": ["first day", "induction", "new hire", "orientation", "day 1", "checklist"],
     "new": ["onboarding", "hire", "joiner", "fresh", "first day"],
 
+    # Policies, SOPs, Summaries & Guidelines
+    "policy": ["policies", "sop", "sops", "procedure", "guidelines", "rules", "standards", "handbook"],
+    "policies": ["policy", "sop", "sops", "procedure", "guidelines", "rules", "standards", "handbook"],
+    "sop": ["sops", "policy", "policies", "procedure", "guidelines", "standard operating procedure"],
+    "sops": ["sop", "policy", "policies", "procedure", "guidelines", "standard operating procedure"],
+    "summary": ["summaries", "overview", "brief", "digest", "sop", "policy", "guidelines"],
+    "summaries": ["summary", "overview", "brief", "digest", "sop", "policy", "guidelines"],
+    "summarize": ["summary", "overview", "brief", "sop", "policy"],
+
     # Leave & Time Off
     "leave": ["vacation", "time off", "holiday", "absence", "pto", "annual leave", "sick leave"],
     "vacation": ["leave", "time off", "holiday", "annual leave", "pto"],
@@ -342,7 +352,7 @@ INTENT_SIGNALS = {
     },
     "prompt_injection_probe": {
         "ignore previous", "disregard instructions", "system prompt", "dan mode",
-        "bypass", "jailbreak", "override", "reveal secret", "sudo",
+        "jailbreak", "reveal secret",
     },
 }
 
@@ -444,9 +454,10 @@ def classify_user_intent_with_confidence(query: str) -> tuple[str, float, bool, 
         return target_intent, 0.99, False, [target_intent]
 
     # 2. Security Injection Probes (Hard Gate, 100% confidence)
-    for sig in INTENT_SIGNALS["prompt_injection_probe"]:
-        if sig in q_lower:
-            return "prompt_injection_probe", 1.0, False, ["prompt_injection_probe"]
+    # The pattern-based guard normalises obfuscation (zero-width, homoglyphs, leetspeak) first; the legacy
+    # substring list stays as a second net.
+    if is_injection(query) or any(sig in q_lower for sig in INTENT_SIGNALS["prompt_injection_probe"]):
+        return "prompt_injection_probe", 1.0, False, ["prompt_injection_probe"]
 
     # 3. Cross-Tenant Extraction Probes (Hard Gate, 100% confidence)
     for sig in INTENT_SIGNALS["cross_tenant_probe"]:

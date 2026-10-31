@@ -6,21 +6,13 @@ data. Instruction-like sentences in documents are excluded from evidence and rep
 from __future__ import annotations
 import math, re
 
+from .guard import flag_sentences, is_injection
 from .retrieval import search, terms
 
-INJECTION = re.compile(
-    r"(ignore|disregard|forget|override|bypass)\b.{0,40}\b(previous|prior|above|all|any|earlier|system|safety|access|polic\w*|instruction\w*|rules?)"
-    r"|\b(reveal|show|print|leak|dump|exfiltrate)\b.{0,30}\b(system prompt|hidden prompt|instructions|other (client|tenant)s?|all (client|tenant)s?|api key|password|secret)"
-    r"|\byou are now\b|\bact as\b|\bnew instructions?\b|\bgrant (me |the user )?(access|admin)|\bi am (an? )?(admin|administrator|client\s*\w+|from client)"
-    r"|\bdeveloper mode\b|\bjailbreak\b|\bsystem prompt\b", re.I)
 NEGATION = re.compile(r"\b(not|never|no|prohibited|forbidden|must not|may not|cannot|shall not)\b", re.I)
 NUMBER = re.compile(r"\d+(?:[.,]\d+)?\s*(?:%|percent|days?|hours?|business days|weeks?|months?|years?|minutes?|usd|inr|eur|\$|₹)?", re.I)
 
 REFUSAL = "The authorised documents available to you do not contain enough information to answer this question."
-
-
-def is_injection(text: str) -> bool:
-    return bool(INJECTION.search(text or ""))
 
 
 def sentences(text: str) -> list[str]:
@@ -43,8 +35,9 @@ def _candidates(hits, qterms):
     for h in hits:
         best = None
         context = set(terms(h["section"] or ""))  # a sentence under "Refund window" is about refund windows
-        for s in sentences(h["text"]):
-            if is_injection(s):
+        sents = sentences(h["text"])
+        for s, bad in zip(sents, flag_sentences(sents)):
+            if bad:
                 flagged += 1
                 continue
             st = set(terms(s)) | context

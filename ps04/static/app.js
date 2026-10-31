@@ -304,11 +304,80 @@
   }
 
   // ------------------------------------------------------------------ audit
-  function auditTable(rows) {
-    return table([["#", function (r) { return r.seq; }], ["Time", function (r) { return r.ts; }], ["Action", function (r) { return r.action; }],
-      ["Actor", function (r) { return r.actor; }], ["Tenant", function (r) { return r.tenant_id; }], ["Counterparty", function (r) { return r.counterparty_tenant_id; }],
-      ["Details", function (r) { return r.details; }], ["Hash", function (r) { return String(r.hash || "").slice(0, 12); }]], rows);
+  // Audit panel: summary counts, category filter, search, highlighted security events, expandable details, CSV export.
+  var AUDIT_GROUPS = {
+    security: ["access.denied", "security.injection_suspected", "auth.login_failed"],
+    documents: ["document.upload", "document.activate", "document.ingest_failed", "document.upload_rejected", "document.read", "citation.open"],
+    questions: ["chat.query"],
+    sharing: ["share.grant", "share.revoke", "share.used"],
+    people: ["membership.add", "membership.remove", "membership.role_change", "user.create", "user.offboard", "tenant.create", "tenant.status", "auth.login", "auth.logout"]
+  };
+  function auditGroup(action) {
+    var g = Object.keys(AUDIT_GROUPS).filter(function (k) { return AUDIT_GROUPS[k].indexOf(action) >= 0; });
+    return g.length ? g[0] : "other";
   }
+  function auditDetails(r) {
+    var d = r.details;
+    if (typeof d === "string") { try { d = JSON.parse(d); } catch (e) { d = {}; } }
+    return d && typeof d === "object" ? d : {};
+  }
+  function auditSummary(r) {
+    var d = auditDetails(r);
+    if (r.action === "chat.query") return "outcome: " + fmt(d.outcome) + ", " + ((d.cited || []).length) + " cited";
+    if (r.action === "security.injection_suspected") return (d.in_question ? "in question" : "") + (d.in_question && d.in_documents ? " + " : "") + (d.in_documents ? d.in_documents + " document sentence(s)" : "");
+    if (r.action === "access.denied") return "tried to open " + fmt(d.resource);
+    if (r.action.indexOf("document.") === 0) return fmt(d.version_no ? "v" + d.version_no : "") + " " + fmt(d.error || d.reason || (d.injection_flagged_chunks ? d.injection_flagged_chunks + " flagged chunk(s)" : "")).trim();
+    if (r.action.indexOf("share.") === 0) return fmt(d.share_id) + (d.document_id ? " doc " + d.document_id : " whole knowledge base");
+    if (r.action.indexOf("membership.") === 0) return fmt(d.user_id) + (d.role ? " as " + d.role : "");
+    return "";
+  }
+  function auditCsv(rows) {
+    var q = function (v) { v = fmt(v); return /^[=+\-@\t\r]/.test(v) ? "'" + v : v; };  // neutralise spreadsheet formula injection
+    var esc = function (v) { return '"' + q(v).replace(/"/g, '""') + '"'; };
+    var head = ["seq", "time", "action", "actor", "tenant", "counterparty", "details", "hash"];
+    var lines = rows.map(function (r) {
+      return [r.seq, r.ts, r.action, r.actor, r.tenant_id, r.counterparty_tenant_id, JSON.stringify(auditDetails(r)), r.hash].map(esc).join(",");
+    });
+    return head.join(",") + "\n" + lines.join("\n");
+  }
+  function auditPanel(rows) {
+    var state = { group: "all", text: "" };
+    var list = el("div"), chips = el("div", { class: "row" });
+    function counts() {
+      var c = { all: rows.length, security: 0, documents: 0, questions: 0, sharing: 0, people: 0, other: 0 };
+      rows.forEach(function (r) { c[auditGroup(r.action)]++; });
+      return c;
+    }
+    function draw() {
+      var c = counts();
+      chips.replaceChildren.apply(chips, ["all", "security", "documents", "questions", "sharing", "people"].map(function (g) {
+        return el("button", { class: "chip" + (state.group === g ? " on" : "") + (g === "security" && c[g] ? " alert" : ""), text: g + " (" + c[g] + ")",
+          onclick: function () { state.group = g; draw(); } });
+      }));
+      var shown = rows.filter(function (r) {
+        if (state.group !== "all" && auditGroup(r.action) !== state.group) return false;
+        var hay = (r.action + " " + (r.actor || "") + " " + auditSummary(r) + " " + JSON.stringify(auditDetails(r))).toLowerCase();
+        return !state.text || hay.indexOf(state.text) >= 0;
+      });
+      list.replaceChildren(el("div", { class: "meta", text: shown.length + " of " + rows.length + " events" }), table([
+        ["#", function (r) { return r.seq; }], ["Time", function (r) { return String(r.ts || "").replace("T", " ").slice(0, 19); }],
+        ["Action", function (r) { return el("span", { class: "badge ev-" + auditGroup(r.action), text: r.action }); }],
+        ["Actor", function (r) { return r.actor || "system / anonymous"; }], ["Summary", auditSummary],
+        ["Hash", function (r) { return String(r.hash || "").slice(0, 10); }],
+        ["", function (r) {
+          return el("details", null, el("summary", { text: "details" }), el("pre", { class: "chunk", text: JSON.stringify({ tenant: r.tenant_id, counterparty: r.counterparty_tenant_id, hash: r.hash, details: auditDetails(r) }, null, 2) }));
+        }]], shown));
+    }
+    var search = el("input", { type: "search", placeholder: "Search action, user, document...", "aria-label": "Search audit events",
+      oninput: function (e) { state.text = e.target.value.trim().toLowerCase(); draw(); } });
+    var exp = el("button", { class: "btn sec", text: "Export CSV", onclick: function () {
+      var a = el("a", { href: URL.createObjectURL(new Blob([auditCsv(rows)], { type: "text/csv" })), download: "audit-export.csv" });
+      document.body.appendChild(a); a.click(); a.remove();
+    } });
+    draw();
+    return el("div", { class: "card" }, chips, el("div", { class: "row" }, search, exp), list);
+  }
+  function auditTable(rows) { return auditPanel(rows); }
   function verifyCard() {
     var out = el("div");
     return el("div", { class: "card" }, el("div", { class: "row" }, el("button", { class: "btn", text: "Verify ledger", onclick: async function () {
@@ -322,7 +391,7 @@
   }
   async function auditView(v) {
     var rows = await api("GET", T("/audit?limit=200"));
-    v.replaceChildren(el("h2", { text: "Audit" }), verifyCard(), el("div", { class: "card" }, auditTable(rows)));
+    v.replaceChildren(el("h2", { text: "Audit" }), el("p", { class: "meta", text: "Every document change, question, share and access attempt for this client. Questions are stored as hashes, never as text." }), verifyCard(), auditPanel(rows));
   }
 
   // --------------------------------------------------------------- platform
@@ -357,7 +426,7 @@
       el("div", { class: "card" }, el("h3", { text: "Ledger" }), el("div", { class: "row" }, el("button", { class: "btn sec", text: "Write checkpoint", onclick: async function () {
         try { var cp = await api("POST", "/audit/checkpoint"); cpOut.replaceChildren(el("pre", { class: "chunk", text: JSON.stringify(cp, null, 2) })); } catch (e) { say(cpOut, e.message); } } })), cpOut),
       verifyCard(),
-      el("div", { class: "card" }, el("h3", { text: "Global audit (metadata)" }), auditTable(res[1])));
+      el("div", { class: "card" }, el("h3", { text: "Global audit (metadata)" })), auditPanel(res[1]));
   }
 
   // --------------------------------------------------------------- security
