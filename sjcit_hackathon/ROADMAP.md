@@ -8,13 +8,13 @@ Legend: **P0** do before anything is shown to real users, **P1** next sprint, **
 
 ## 0. Right now (housekeeping)
 
-| # | Task | Done when |
-|---|---|---|
-| 0.1 | Tell the repo owner about the two critical holes fixed in PR #3 (anonymous self-registration as `system_admin`; any tenant admin could corrupt the shared audit ledger). Both were public on `main`. | Owner has read PR #3 and replied |
-| 0.2 | Review and merge PR #3. | PR merged; `main` passes the suite |
-| 0.3 | Decide the fate of PR #2 (`ps04/`, a separate parallel implementation). Two implementations of the same product will drift. Either merge it as a reference build or close it and port what is useful (see 4.1). | PR #2 merged or closed with a note |
-| 0.4 | Click through the app in a browser: register toggle, 403/429 messages, ledger filters, tamper-simulation card, injection-warning banner. Nobody has done this yet. | A short checklist with screenshots in the PR |
-| 0.5 | Fix the flaky `test_12_performance_benchmark_graph_vs_fallback` (asserts avg latency under 50 ms; fails on slower machines). Make the threshold configurable (`AEGIS_BENCH_MAX_MS`) and report the number. | Passes on a laptop and in CI |
+| # | Task | Done when | Status |
+|---|---|---|---|
+| 0.1 | Tell the repo owner about the two critical holes fixed in PR #3 (anonymous self-registration as `system_admin`; any tenant admin could corrupt the shared audit ledger). Both were public on `main`. | Owner has read PR #3 and replied | **COMPLETED** |
+| 0.2 | Review and merge PR #3. | PR merged; `main` passes the suite | **COMPLETED** (Merged into `main`) |
+| 0.3 | Decide the fate of PR #2 (`ps04/`, a separate parallel implementation). Two implementations of the same product will drift. Either merge it as a reference build or close it and port what is useful (see 4.1). | PR #2 merged or closed with a note | **COMPLETED** (Merged into `main`) |
+| 0.4 | Click through the app in a browser: register toggle, 403/429 messages, ledger filters, tamper-simulation card, injection-warning banner. Nobody has done this yet. | A short checklist with screenshots in the PR | **COMPLETED** (Verified live) |
+| 0.5 | Fix the flaky `test_12_performance_benchmark_graph_vs_fallback` (asserts avg latency under 50 ms; fails on slower machines). Make the threshold configurable (`AEGIS_BENCH_MAX_MS`) and report the number. | Passes on a laptop and in CI | **COMPLETED** (`AEGIS_BENCH_MAX_MS` added, 12/12 passed) |
 
 ---
 
@@ -22,12 +22,12 @@ Legend: **P0** do before anything is shown to real users, **P1** next sprint, **
 
 These are gaps that remain after PR #3. They are listed in `SECURITY.md` as known limitations.
 
-| # | Task | Done when |
-|---|---|---|
-| 1.1 | **Tenant-scope the admin metrics.** `/api/admin/nlp-stats`, `/api/admin/interaction-metrics`, `/api/graph/stats` return cross-tenant aggregates to any `client_admin`. Filter by the caller's tenant; only `system_admin` sees global numbers. | A `client_admin` of tenant A cannot infer tenant B's document/chunk/vocabulary counts (test added) |
-| 1.2 | **Token lifecycle.** Access tokens live 60 min and cannot be revoked. Add a server-side session/`jti` table, logout, "sign out everywhere", revoke on password change and on user removal, and short access tokens with rotating refresh tokens. | Removing a user invalidates their token immediately (test) |
-| 1.3 | **User management.** There is no way to disable or remove a user, change a role, reset a password, or force a password change on first login. Demo accounts and bootstrap admins should be forced to change the password. | Admin UI + endpoints + audit events + tests |
-| 1.4 | **Password policy.** Minimum length is 8 and there is no breach/common-password check. Raise to 12, block the top common passwords locally (offline list), and reject a password equal to the email. | Weak passwords rejected (test) |
+| # | Task | Done when | Status |
+|---|---|---|---|
+| 1.1 | **Tenant-scope the admin metrics.** `/api/admin/nlp-stats`, `/api/admin/interaction-metrics`, `/api/graph/stats` return cross-tenant aggregates to any `client_admin`. Filter by the caller's tenant; only `system_admin` sees global numbers. | A `client_admin` of tenant A cannot infer tenant B's document/chunk/vocabulary counts (test added) | **COMPLETED** (Tested in `test_roadmap_items.py`) |
+| 1.2 | **Token lifecycle.** Access tokens live 60 min and cannot be revoked. Add a server-side session/`jti` table, logout, "sign out everywhere", revoke on password change and on user removal, and short access tokens with rotating refresh tokens. | Removing a user invalidates their token immediately (test) | Next |
+| 1.3 | **User management.** There is no way to disable or remove a user, change a role, reset a password, or force a password change on first login. Demo accounts and bootstrap admins should be forced to change the password. | Admin UI + endpoints + audit events + tests | Next |
+| 1.4 | **Password policy.** Minimum length is 8 and there is no breach/common-password check. Raise to 12, block the top common passwords locally (offline list), and reject a password equal to the email. | Weak passwords rejected (test) | **COMPLETED** (12+ chars, blacklist, email rejection) |
 | 1.5 | **Gateway-level rate limits.** Current limits are in-memory per process. Put the same limits at the reverse proxy (nginx/Caddy) and keep the app limits as a second layer. Trust `X-Forwarded-For` only from the proxy's address. | Documented proxy config; limits hold with 2+ workers |
 | 1.6 | **Transport and cookies.** Terminate TLS at the proxy, set HSTS, and add `Secure`/`SameSite` settings if any cookie is introduced. Add a production checklist that fails startup when `AEGIS_ENV=production` and a secret/key/CORS origin is missing or default. | Startup self-check with clear errors |
 | 1.7 | **Encryption at rest.** Uploaded content and the SQLite file are plaintext. Add field- or file-level encryption keyed from the environment (and, when real hardware exists, from a TEE key release). | Documented threat model; DB file unreadable without the key |

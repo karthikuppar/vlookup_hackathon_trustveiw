@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { Shield, MessageSquare, FileText, Share2, Database, Cpu, LogOut, User, ShieldCheck, Wrench } from 'lucide-react'
 import { getSession, saveSession, clearSession } from './services/session'
-import { isAdminRole } from './services/http'
+import { api, isAdminRole } from './services/http'
 import Banner from './components/Banner'
 import AuthScreen from './views/AuthScreen'
 import ChatView from './views/ChatView'
@@ -20,7 +20,14 @@ export default function App() {
 
   const token = session?.access_token
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      if (token) {
+        await api('/api/auth/logout', token, { method: 'POST' })
+      }
+    } catch {
+      // ignore network errors during sign out
+    }
     clearSession()
     setSession(null)
   }
@@ -76,7 +83,7 @@ export default function App() {
           </div>
 
           <div className="user-badge">
-            <User size={14} color="#94a3b8" />
+            <User size={14} color="var(--accent-secondary)" />
             <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>{session.user?.name}</span>
             <span className="role-tag">({roleLabel})</span>
           </div>

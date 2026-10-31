@@ -121,27 +121,27 @@ export default function LedgerView({ token, user, setSuccess, setError }) {
           role="status"
           aria-live="polite"
           style={{
-            background: verification.valid ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)',
-            border: `1px solid ${verification.valid ? 'rgba(16,185,129,0.4)' : 'rgba(244,63,94,0.4)'}`,
+            background: verification.valid ? '#D1FAE5' : '#FEE2E2',
+            border: `1px solid ${verification.valid ? '#065F46' : '#991B1B'}`,
             padding: '1rem',
-            borderRadius: '10px',
+            borderRadius: '6px',
             margin: '0.75rem 0 1.25rem',
             display: 'flex',
             alignItems: 'center',
             gap: '0.85rem',
           }}
         >
-          {verification.valid ? <CheckCircle2 size={24} color="#10b981" /> : <XCircle size={24} color="#f43f5e" />}
+          {verification.valid ? <CheckCircle2 size={24} color="#065F46" /> : <XCircle size={24} color="#991B1B" />}
           <div>
-            <b style={{ color: verification.valid ? '#34d399' : '#fda4af', fontSize: '0.95rem' }}>
+            <b style={{ color: verification.valid ? '#065F46' : '#991B1B', fontSize: '0.95rem', fontWeight: 800 }}>
               {verification.valid ? 'Cryptographic Integrity Intact' : `TAMPER DETECTED at Sequence #${verification.tampered_sequence}`}
             </b>
-            <p style={{ fontSize: '0.8rem', color: '#cbd5e1', marginTop: '0.2rem' }}>
+            <p style={{ fontSize: '0.82rem', color: '#000000', marginTop: '0.2rem', fontWeight: 600 }}>
               {verification.valid ? `Chain head: ${verification.chain_head}` : verification.reason}
               {verification.error_type === 'payload_mismatch' ? ' (payload does not match its recorded digest)' : ''}
             </p>
             {verification.legacy_unverified > 0 && (
-              <p style={{ fontSize: '0.78rem', color: '#fde68a', marginTop: '0.2rem' }}>
+              <p style={{ fontSize: '0.78rem', color: '#92400E', marginTop: '0.2rem', fontWeight: 700 }}>
                 {verification.legacy_unverified} legacy row(s) were written before payload storage and could not be payload-verified.
               </p>
             )}
@@ -152,8 +152,8 @@ export default function LedgerView({ token, user, setSuccess, setError }) {
       <div className="chip-row" role="group" aria-label="Filter events by category">
         {['all', ...CATEGORIES].map(k => (
           <button key={k} type="button" className="chip" aria-pressed={category === k} onClick={() => setCategory(k)}>
-            {k}
-            <span className="chip-count">{counts[k]}</span>
+            <span style={{ fontWeight: 700 }}>{k}</span>
+            <span className="chip-count" style={{ fontWeight: 800, marginLeft: '0.35rem' }}>{counts[k]}</span>
           </button>
         ))}
         <input
@@ -174,7 +174,7 @@ export default function LedgerView({ token, user, setSuccess, setError }) {
               <th>Timestamp</th>
               <th>Event Type</th>
               <th>Actor (HMAC)</th>
-              <th>Tenant</th>
+              <th>Organization</th>
               <th>Decision</th>
               <th>Payload Digest</th>
               <th>Entry Hash</th>
@@ -182,25 +182,25 @@ export default function LedgerView({ token, user, setSuccess, setError }) {
           </thead>
           <tbody>
             {visible.length === 0 && (
-              <tr><td colSpan={8} style={{ color: '#94a3b8', padding: '1rem' }}>No events match the current filter.</td></tr>
+              <tr><td colSpan={8} style={{ color: '#000000', padding: '1rem', fontWeight: 600 }}>No events match the current filter.</td></tr>
             )}
             {visible.map(ev => {
               const denied = isDenied(ev)
               const cls = denied ? 'ledger-row ledger-row-denied' : categorize(ev) === 'security' ? 'ledger-row ledger-row-security' : 'ledger-row'
               return (
                 <tr key={ev.sequence} className={cls}>
-                  <td>#{ev.sequence}</td>
-                  <td style={{ color: '#94a3b8' }}>{ev.timestamp?.slice(11, 19)}</td>
-                  <td><b style={{ color: '#fff' }}>{ev.event_type}</b></td>
-                  <td><span className="hash-code">{ev.actor_id}</span></td>
-                  <td><span className="spec-badge">{ev.tenant_id}</span></td>
+                  <td style={{ fontWeight: 800, color: '#000000', fontFamily: 'monospace' }}>#{ev.sequence}</td>
+                  <td style={{ color: '#000000', fontWeight: 700, fontFamily: 'monospace' }}>{ev.timestamp?.slice(11, 19)}</td>
+                  <td><b style={{ color: '#000000', fontWeight: 700 }}>{ev.event_type}</b></td>
+                  <td><span className="hash-code" style={{ color: '#000000', fontWeight: 700 }}>{ev.actor_id}</span></td>
+                  <td><span className="spec-badge" style={{ color: '#000000', fontWeight: 700 }}>{ev.tenant_id}</span></td>
                   <td>
-                    <span className={OK_DECISIONS.has(ev.decision) ? 'decision-ok' : 'decision-bad'}>
+                    <span className={OK_DECISIONS.has(ev.decision) ? 'decision-ok' : 'decision-bad'} style={{ fontWeight: 800 }}>
                       {denied ? '⛔ ' : ''}{ev.decision}
                     </span>
                   </td>
-                  <td><span className="hash-code">{ev.payload_digest?.slice(7, 23)}...</span></td>
-                  <td><span className="hash-code" style={{ color: '#a5b4fc' }}>{ev.entry_hash?.slice(7, 23)}...</span></td>
+                  <td><span className="hash-code" style={{ color: '#000000', fontWeight: 700 }}>{ev.payload_digest?.slice(7, 23)}...</span></td>
+                  <td><span className="hash-code" style={{ color: '#000000', fontWeight: 700 }}>{ev.entry_hash?.slice(7, 23)}...</span></td>
                 </tr>
               )
             })}

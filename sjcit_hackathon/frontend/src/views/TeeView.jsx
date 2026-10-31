@@ -40,31 +40,31 @@ export default function TeeView({ token, setSuccess, setError }) {
         Per Section 6.2 of the specification, the application truthfully discloses deployment status as a SIMULATION unless compatible confidential hardware (Intel TDX / AMD SEV-SNP) is present.
       </p>
 
-      <div style={{ marginTop: '1.25rem', background: 'rgba(9, 13, 22, 0.6)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '1.25rem' }}>
+      <div style={{ marginTop: '1.25rem', background: '#FAF7F0', border: '1px solid #000000', borderRadius: '6px', padding: '1.25rem' }}>
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
           <span className="indicator-dot dot-cyan" />
-          <b style={{ color: '#22d3ee' }}>Deployment Mode: {teeStatus?.mode?.toUpperCase()}</b>
+          <b style={{ color: '#000000', fontWeight: 800 }}>Deployment Mode: {teeStatus?.mode?.toUpperCase()}</b>
         </div>
-        <p style={{ fontSize: '0.85rem', color: '#cbd5e1', marginTop: '0.5rem', lineHeight: 1.5 }}>
+        <p style={{ fontSize: '0.85rem', color: '#000000', marginTop: '0.5rem', lineHeight: 1.5, fontWeight: 500 }}>
           {teeStatus?.status_description}
         </p>
 
         <div style={{ marginTop: '1rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
-          <div style={{ background: 'rgba(0,0,0,0.3)', padding: '0.75rem', borderRadius: '6px' }}>
-            <span style={{ fontSize: '0.72rem', color: '#64748b', textTransform: 'uppercase' }}>Expected MRENCLAVE:</span>
-            <div className="hash-code" style={{ marginTop: '0.25rem' }}>{teeStatus?.attestation_policy?.expected_mrenclave}</div>
+          <div style={{ background: '#F0E9DD', border: '1px solid #000000', padding: '0.75rem', borderRadius: '4px' }}>
+            <span style={{ fontSize: '0.72rem', color: '#000000', textTransform: 'uppercase', fontWeight: 700 }}>Expected MRENCLAVE:</span>
+            <div className="hash-code" style={{ marginTop: '0.35rem', display: 'block', wordBreak: 'break-all' }}>{teeStatus?.attestation_policy?.expected_mrenclave}</div>
           </div>
-          <div style={{ background: 'rgba(0,0,0,0.3)', padding: '0.75rem', borderRadius: '6px' }}>
-            <span style={{ fontSize: '0.72rem', color: '#64748b', textTransform: 'uppercase' }}>Expected MRSIGNER:</span>
-            <div className="hash-code" style={{ marginTop: '0.25rem' }}>{teeStatus?.attestation_policy?.expected_mrsigner}</div>
+          <div style={{ background: '#F0E9DD', border: '1px solid #000000', padding: '0.75rem', borderRadius: '4px' }}>
+            <span style={{ fontSize: '0.72rem', color: '#000000', textTransform: 'uppercase', fontWeight: 700 }}>Expected MRSIGNER:</span>
+            <div className="hash-code" style={{ marginTop: '0.35rem', display: 'block', wordBreak: 'break-all' }}>{teeStatus?.attestation_policy?.expected_mrsigner}</div>
           </div>
         </div>
       </div>
 
       {/* Attestation Verification Playground */}
       <div style={{ marginTop: '1.5rem' }}>
-        <h3 style={{ fontSize: '0.92rem', color: '#fff', marginBottom: '0.5rem' }}>Attestation Policy Verification Simulator</h3>
-        <p style={{ fontSize: '0.82rem', color: '#94a3b8', marginBottom: '1rem' }}>
+        <h3 style={{ fontSize: '0.92rem', color: '#000000', fontWeight: 800, marginBottom: '0.5rem' }}>Attestation Policy Verification Simulator</h3>
+        <p style={{ fontSize: '0.82rem', color: '#000000', marginBottom: '1rem' }}>
           Demonstrate that secrets are released ONLY when attestation measurements match approved policy.
         </p>
 
@@ -74,7 +74,7 @@ export default function TeeView({ token, setSuccess, setError }) {
             <span>Test Valid Attestation Quote</span>
           </button>
 
-          <button className="btn-secondary" style={{ borderColor: 'rgba(244,63,94,0.4)', color: '#fb7185' }} onClick={() => testAttestation(true)}>
+          <button className="btn-secondary" style={{ borderColor: '#991B1B', color: '#991B1B' }} onClick={() => testAttestation(true)}>
             <XCircle size={14} />
             <span>Test Tampered Quote (Should Reject)</span>
           </button>
@@ -84,14 +84,14 @@ export default function TeeView({ token, setSuccess, setError }) {
           <div style={{
             marginTop: '1.25rem',
             padding: '1rem',
-            borderRadius: '8px',
-            background: attestationRes.verified ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)',
-            border: `1px solid ${attestationRes.verified ? 'rgba(16,185,129,0.3)' : 'rgba(244,63,94,0.3)'}`,
+            borderRadius: '6px',
+            background: attestationRes.verified ? '#D1FAE5' : '#FEE2E2',
+            border: `1px solid ${attestationRes.verified ? '#065F46' : '#991B1B'}`,
           }}>
-            <b style={{ color: attestationRes.verified ? '#34d399' : '#fb7185' }}>
+            <b style={{ color: attestationRes.verified ? '#065F46' : '#991B1B', fontWeight: 800 }}>
               Attestation Result: {attestationRes.status}
             </b>
-            <p style={{ fontSize: '0.82rem', color: '#cbd5e1', marginTop: '0.25rem' }}>
+            <p style={{ fontSize: '0.82rem', color: '#000000', marginTop: '0.25rem', fontWeight: 600 }}>
               Secret Released: {attestationRes.secret_released ? `Yes [${attestationRes.released_secret}]` : 'Denied (0 secrets released)'}
             </p>
           </div>

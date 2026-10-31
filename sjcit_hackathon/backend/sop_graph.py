@@ -320,24 +320,42 @@ class SOPKnowledgeGraph:
         """Removes a document from the graph."""
         self.build_graph()
 
-    def get_stats(self) -> dict[str, Any]:
-        """Provides graph topology metrics for transparency and inspection."""
+    def get_stats(self, tenant_id: str | None = None) -> dict[str, Any]:
+        """Provides graph topology metrics for transparency and inspection, optionally scoped by tenant."""
         type_counts = defaultdict(int)
-        for node in self.nodes.values():
-            type_counts[node["type"]] += 1
+        scoped_nodes = {}
+        for nid, node in self.nodes.items():
+            nt = node.get("type")
+            node_tenant = node.get("attributes", {}).get("tenant_id")
+            if tenant_id and node_tenant and node_tenant != tenant_id and node_tenant not in {"default", "shared"}:
+                continue
+            scoped_nodes[nid] = node
+            type_counts[nt] += 1
 
         rel_counts = defaultdict(int)
+        total_edges = 0
         for src, rel_dict in self.edges.items():
+            if src not in scoped_nodes:
+                continue
             for rel, targets in rel_dict.items():
-                rel_counts[rel] += len(targets)
+                valid_targets = [t for t in targets if t in scoped_nodes]
+                if valid_targets:
+                    rel_counts[rel] += len(valid_targets)
+                    total_edges += len(valid_targets)
+
+        indexed_chunks = sum(
+            1 for c in self.chunk_cache.values()
+            if not tenant_id or c.get("tenant_id") in {tenant_id, "default", "shared"}
+        )
 
         return {
             "status": "ready",
-            "total_nodes": len(self.nodes),
-            "total_edges": sum(rel_counts.values()),
+            "total_nodes": len(scoped_nodes),
+            "total_edges": total_edges,
             "nodes_by_type": dict(type_counts),
             "edges_by_relationship": dict(rel_counts),
-            "indexed_chunks": len(self.chunk_cache),
+            "indexed_chunks": indexed_chunks,
             "build_time_ms": self.build_time_ms,
             "last_built_at": self.last_built_at,
+            "scoped_tenant_id": tenant_id,
         }

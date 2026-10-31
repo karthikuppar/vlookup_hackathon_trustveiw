@@ -5,6 +5,7 @@ import os
 import json
 import uuid
 from typing import Any, Literal
+from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -13,12 +14,16 @@ from pydantic import BaseModel, EmailStr, Field
 from abuse_guard import limiter
 from auth_security import (
     DUMMY_PASSWORD_HASH,
+    blacklist_token,
     check_login_rate_limit,
     create_access_token,
     decode_access_token,
     hash_password,
+    is_token_blacklisted,
     record_failed_login,
     reset_failed_logins,
+    revoke_all_user_tokens,
+    validate_password_policy,
     verify_password,
 )
 from crypto_utils import now_utc_iso
@@ -120,6 +125,21 @@ class AddMemberRequest(BaseModel):
     role: Literal["client_admin", "client_employee"] = "client_employee"
 
 
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str = Field(min_length=8, max_length=64)
+
+
+class UpdateMemberRequest(BaseModel):
+    role: Literal["client_admin", "client_employee"] | None = None
+    is_active: bool | None = None
+    must_change_password: bool | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=8, max_length=64)
+
+
 class DirectDocUploadRequest(BaseModel):
     title: str
     filename: str
@@ -175,21 +195,48 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict[str, Any
     if not payload or not payload.get("user_id"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired authentication token")
 
+    jti = payload.get("jti")
+    token_iat = payload.get("iat")
+
+    if jti and is_token_blacklisted(jti):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has been revoked or logged out")
+
     with get_connection() as conn:
-        user = conn.execute("SELECT id, name, email, role, tenant_id FROM users WHERE id = ?", (payload["user_id"],)).fetchone()
+        user = conn.execute(
+            "SELECT id, name, email, role, tenant_id, is_active, tokens_revoked_before, must_change_password FROM users WHERE id = ?",
+            (payload["user_id"],),
+        ).fetchone()
 
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found or removed")
 
     user_dict = dict(user)
+    if not user_dict.get("is_active", 1):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account is deactivated")
+
+    revoked_before = user_dict.get("tokens_revoked_before")
+    if revoked_before and token_iat:
+        rev_ts = None
+        try:
+            from datetime import datetime as dt
+            rev_ts = dt.fromisoformat(revoked_before.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            pass
+        if rev_ts is not None and token_iat < rev_ts:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has been invalidated (signed out)")
+
+
+
     if payload.get("tenant_id") and payload["tenant_id"] != user_dict["tenant_id"]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token tenant claim mismatch")
 
+    user_dict["token_jti"] = jti
+    user_dict["raw_token"] = token
     return user_dict
 
 
-@app.on_event("startup")
-def on_startup():
+@asynccontextmanager
+async def lifespan_handler(application: FastAPI):
     init_db()
     try:
         from session_tracker import SessionTracker
@@ -212,14 +259,16 @@ def on_startup():
     except Exception as e:
         print(f"SOP Knowledge Graph init warning: {e}")
 
+    yield
 
-@app.on_event("shutdown")
-def on_shutdown():
     try:
         from session_tracker import SessionTracker
         SessionTracker.end_application_run("completed")
     except Exception as e:
         print(f"SessionTracker shutdown warning: {e}")
+
+
+app.router.lifespan_context = lifespan_handler
 
 
 def bootstrap_system_admin() -> None:
@@ -234,8 +283,10 @@ def bootstrap_system_admin() -> None:
             return
         now = now_utc_iso()
         conn.execute("INSERT OR IGNORE INTO tenants VALUES ('system', 'Platform Administration', ?)", (now,))
-        conn.execute("INSERT INTO users VALUES (?, ?, ?, ?, 'system_admin', 'system', ?)",
-                     (f"usr_{uuid.uuid4().hex[:12]}", "System Administrator", email.lower(), hash_password(password), now))
+        conn.execute(
+            "INSERT INTO users (id, name, email, password_hash, role, tenant_id, created_at) VALUES (?, ?, ?, ?, 'system_admin', 'system', ?)",
+            (f"usr_{uuid.uuid4().hex[:12]}", "System Administrator", email.lower(), hash_password(password), now)
+        )
     log.warning("Created the bootstrap system administrator %s", email.lower())
 
 
@@ -258,36 +309,19 @@ def seed_demo_data():
 
         # 2. Seed Users
         pwd_hash = hash_password(DEMO_PASSWORD)
-        conn.execute("INSERT OR IGNORE INTO users VALUES ('usr_sysadmin', 'System SuperAdmin', 'sysadmin@ps04platform.com', ?, 'system_admin', 'system', ?)", (pwd_hash, now))
-        conn.execute("INSERT OR IGNORE INTO users VALUES ('usr_admin_a', 'Alice Admin', 'admin@acrocorp.com', ?, 'client_admin', 'tenant_a', ?)", (pwd_hash, now))
-        conn.execute("INSERT OR IGNORE INTO users VALUES ('usr_emp_a', 'Edward Employee', 'employee@acrocorp.com', ?, 'client_employee', 'tenant_a', ?)", (pwd_hash, now))
-        conn.execute("INSERT OR IGNORE INTO users VALUES ('usr_admin_b', 'Bob Admin', 'admin@betashield.com', ?, 'client_admin', 'tenant_b', ?)", (pwd_hash, now))
-        conn.execute("INSERT OR IGNORE INTO users VALUES ('usr_emp_b', 'Betty Employee', 'employee@betashield.com', ?, 'client_employee', 'tenant_b', ?)", (pwd_hash, now))
+        conn.execute("INSERT OR IGNORE INTO users (id, name, email, password_hash, role, tenant_id, created_at) VALUES ('usr_sysadmin', 'System SuperAdmin', 'sysadmin@ps04platform.com', ?, 'system_admin', 'system', ?)", (pwd_hash, now))
+        conn.execute("INSERT OR IGNORE INTO users (id, name, email, password_hash, role, tenant_id, created_at) VALUES ('usr_admin_a', 'Alice Admin', 'admin@acrocorp.com', ?, 'client_admin', 'tenant_a', ?)", (pwd_hash, now))
+        conn.execute("INSERT OR IGNORE INTO users (id, name, email, password_hash, role, tenant_id, created_at) VALUES ('usr_emp_a', 'Edward Employee', 'employee@acrocorp.com', ?, 'client_employee', 'tenant_a', ?)", (pwd_hash, now))
+        conn.execute("INSERT OR IGNORE INTO users (id, name, email, password_hash, role, tenant_id, created_at) VALUES ('usr_emp_sam', 'Sam Employee', 'sam@acrocorp.com', ?, 'client_employee', 'tenant_a', ?)", (pwd_hash, now))
+        conn.execute("INSERT OR IGNORE INTO users (id, name, email, password_hash, role, tenant_id, created_at) VALUES ('usr_admin_b', 'Bob Admin', 'admin@betashield.com', ?, 'client_admin', 'tenant_b', ?)", (pwd_hash, now))
+        conn.execute("INSERT OR IGNORE INTO users (id, name, email, password_hash, role, tenant_id, created_at) VALUES ('usr_emp_b', 'Betty Employee', 'employee@betashield.com', ?, 'client_employee', 'tenant_b', ?)", (pwd_hash, now))
 
-        has_ops_doc = conn.execute("SELECT id FROM documents WHERE title = 'AcroCorp Operational Guidelines'").fetchone()
 
-    # Seed Document 0 if missing
-    if not has_ops_doc:
-        doc_ops_text = (
-            "AcroCorp Operational Guidelines (SOP-OPS-001):\n\n"
-            "SECTION 1: INVOICING POLICY\n"
-            "All vendor and customer service invoices have a mandatory settlement deadline of 30 days. "
-            "Late payments incur a 1.5% interest penalty per month.\n\n"
-            "SECTION 2: INFRASTRUCTURE ACCESS\n"
-            "Direct remote vendor access is permitted only with written manager sign-off. "
-            "Third-party personnel must use ephemeral credential pairs that expire after 4 hours."
-        )
-        DocumentService.ingest_document(
-            tenant_id="tenant_a",
-            user_id="usr_admin_a",
-            title="AcroCorp Operational Guidelines",
-            filename="acrocorp_operational_guidelines.txt",
-            content_bytes=doc_ops_text.encode("utf-8"),
-        )
+        has_docs = conn.execute("SELECT COUNT(*) as c FROM documents").fetchone()["c"] > 0
 
-    with get_connection() as conn:
-        if conn.execute("SELECT COUNT(*) as c FROM documents").fetchone()["c"] > 1:
-            return
+    if has_docs:
+        return
+
 
     # --- Document 1: Employee Onboarding SOP ---
     doc_onboarding = """ACROCORP EMPLOYEE ONBOARDING STANDARD OPERATING PROCEDURE (SOP-HR-001)
@@ -561,6 +595,12 @@ def register_user(req: RegisterRequest, request: Request):
         raise HTTPException(status_code=403, detail="Self-registration is disabled. Ask your administrator to create your account.")
     throttle("register", client_ip(request))
     email = str(req.email).lower()
+    from auth_security import validate_password_policy
+    try:
+        validate_password_policy(req.password, email=email)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+
     role = "client_employee"
     with get_connection() as conn:
         tenant = conn.execute("SELECT id FROM tenants WHERE id = ?", (req.tenant_id,)).fetchone()
@@ -575,7 +615,7 @@ def register_user(req: RegisterRequest, request: Request):
         now = now_utc_iso()
         pwd_hash = hash_password(req.password)
         conn.execute(
-            "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO users (id, name, email, password_hash, role, tenant_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (user_id, req.name.strip(), email, pwd_hash, role, req.tenant_id, now),
         )
 
@@ -688,6 +728,74 @@ def get_me(user: dict[str, Any] = Depends(get_current_user)):
     return {"user": user}
 
 
+@app.post("/api/auth/logout")
+def logout_user(user: dict[str, Any] = Depends(get_current_user)):
+    jti = user.get("token_jti")
+    if jti:
+        blacklist_token(jti, user["id"], reason="logout")
+    AuditLedger.append_event(
+        event_type="user_logged_out",
+        actor_id=user["id"],
+        tenant_id=user["tenant_id"],
+        resource_id=user["id"],
+        action="logout",
+        decision="permitted",
+    )
+    return {"message": "Logged out successfully"}
+
+
+@app.post("/api/auth/logout-all")
+def logout_all_sessions(user: dict[str, Any] = Depends(get_current_user)):
+    revoke_all_user_tokens(user["id"])
+    AuditLedger.append_event(
+        event_type="user_sessions_revoked",
+        actor_id=user["id"],
+        tenant_id=user["tenant_id"],
+        resource_id=user["id"],
+        action="revoke_all_sessions",
+        decision="permitted",
+    )
+    return {"message": "All active sessions revoked"}
+
+
+@app.post("/api/auth/change-password")
+def change_password(req: ChangePasswordRequest, user: dict[str, Any] = Depends(get_current_user)):
+    email = user["email"]
+    with get_connection() as conn:
+        row = conn.execute("SELECT password_hash FROM users WHERE id = ?", (user["id"],)).fetchone()
+    if not row or not verify_password(req.old_password, row["password_hash"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    if req.old_password == req.new_password:
+        raise HTTPException(status_code=400, detail="New password cannot be identical to current password")
+
+    try:
+        validate_password_policy(req.new_password, email=email)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+
+    new_hash = hash_password(req.new_password)
+    now = now_utc_iso()
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE users SET password_hash = ?, must_change_password = 0, tokens_revoked_before = ? WHERE id = ?",
+            (new_hash, now, user["id"]),
+        )
+
+    AuditLedger.append_event(
+        event_type="user_password_changed",
+        actor_id=user["id"],
+        tenant_id=user["tenant_id"],
+        resource_id=user["id"],
+        action="change_password",
+        decision="permitted",
+    )
+
+    new_token = create_access_token({"user_id": user["id"], "role": user["role"], "tenant_id": user["tenant_id"]})
+    return {"message": "Password changed successfully", "access_token": new_token, "token_type": "bearer"}
+
+
+
 # --- Client / Tenant Management ---
 @app.post("/api/clients", status_code=status.HTTP_201_CREATED)
 def create_client(req: CreateClientRequest, user: dict[str, Any] = Depends(get_current_user)):
@@ -733,6 +841,12 @@ def add_client_member(client_id: str, req: AddMemberRequest, user: dict[str, Any
         raise HTTPException(status_code=403, detail="Cannot manage members of another tenant")
 
     email = str(req.email).lower()
+    from auth_security import validate_password_policy
+    try:
+        validate_password_policy(req.password, email=email)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+
     with get_connection() as conn:
         existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
         if existing:
@@ -741,7 +855,10 @@ def add_client_member(client_id: str, req: AddMemberRequest, user: dict[str, Any
         user_id = f"usr_{uuid.uuid4().hex[:12]}"
         now = now_utc_iso()
         pwd_hash = hash_password(req.password)
-        conn.execute("INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)", (user_id, req.name, email, pwd_hash, req.role, client_id, now))
+        conn.execute(
+            "INSERT INTO users (id, name, email, password_hash, role, tenant_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, req.name, email, pwd_hash, req.role, client_id, now)
+        )
 
     AuditLedger.append_event(
         event_type="client_member_added",
@@ -762,8 +879,152 @@ def list_client_members(client_id: str, user: dict[str, Any] = Depends(get_curre
     if user["tenant_id"] != client_id and user["role"] != "system_admin":
         raise HTTPException(status_code=403, detail="Access to other tenant member lists is prohibited")
     with get_connection() as conn:
-        rows = conn.execute("SELECT id, name, email, role, tenant_id, created_at FROM users WHERE tenant_id = ?", (client_id,)).fetchall()
+        rows = conn.execute(
+            "SELECT id, name, email, role, tenant_id, created_at, is_active, must_change_password FROM users WHERE tenant_id = ? ORDER BY created_at DESC",
+            (client_id,),
+        ).fetchall()
     return {"members": [dict(r) for r in rows]}
+
+
+@app.patch("/api/clients/{client_id}/members/{user_id}")
+def update_client_member(
+    client_id: str,
+    user_id: str,
+    req: UpdateMemberRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    require_admin(user)
+    if user["tenant_id"] != client_id and user["role"] != "system_admin":
+        raise HTTPException(status_code=403, detail="Cannot manage members of another tenant")
+
+    with get_connection() as conn:
+        target = conn.execute("SELECT * FROM users WHERE id = ? AND tenant_id = ?", (user_id, client_id)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="Member not found in this tenant")
+
+        target_dict = dict(target)
+        if target_dict["role"] == "system_admin":
+            raise HTTPException(status_code=403, detail="System administrators cannot be modified via tenant member API")
+
+        updates = []
+        params = []
+        if req.role is not None:
+            updates.append("role = ?")
+            params.append(req.role)
+        if req.is_active is not None:
+            updates.append("is_active = ?")
+            params.append(1 if req.is_active else 0)
+        if req.must_change_password is not None:
+            updates.append("must_change_password = ?")
+            params.append(1 if req.must_change_password else 0)
+
+        if not updates:
+            return {"member": target_dict}
+
+        params.extend([user_id, client_id])
+        conn.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ? AND tenant_id = ?", params)
+
+    if req.role is not None or req.is_active is False:
+        revoke_all_user_tokens(user_id)
+
+    AuditLedger.append_event(
+        event_type="client_member_updated",
+        actor_id=user["id"],
+        tenant_id=client_id,
+        resource_id=user_id,
+        action="update_member",
+        decision="permitted",
+        details={"updates": req.model_dump(exclude_none=True)},
+    )
+
+    with get_connection() as conn:
+        updated = conn.execute("SELECT id, name, email, role, tenant_id, created_at, is_active, must_change_password FROM users WHERE id = ?", (user_id,)).fetchone()
+    return {"member": dict(updated)}
+
+
+@app.delete("/api/clients/{client_id}/members/{user_id}")
+def delete_client_member(
+    client_id: str,
+    user_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    require_admin(user)
+    if user["tenant_id"] != client_id and user["role"] != "system_admin":
+        raise HTTPException(status_code=403, detail="Cannot manage members of another tenant")
+    if user["id"] == user_id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+
+    with get_connection() as conn:
+        target = conn.execute("SELECT * FROM users WHERE id = ? AND tenant_id = ?", (user_id, client_id)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="Member not found in this tenant")
+
+        target_dict = dict(target)
+        if target_dict["role"] == "system_admin":
+            raise HTTPException(status_code=403, detail="System administrators cannot be deleted")
+
+        conn.execute("DELETE FROM users WHERE id = ? AND tenant_id = ?", (user_id, client_id))
+
+    revoke_all_user_tokens(user_id)
+
+    AuditLedger.append_event(
+        event_type="client_member_removed",
+        actor_id=user["id"],
+        tenant_id=client_id,
+        resource_id=user_id,
+        action="remove_member",
+        decision="permitted",
+        details={"email": target_dict["email"]},
+    )
+    return {"message": f"Member {user_id} removed successfully"}
+
+
+@app.post("/api/clients/{client_id}/members/{user_id}/reset-password")
+def reset_member_password(
+    client_id: str,
+    user_id: str,
+    req: ResetPasswordRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    require_admin(user)
+    if user["tenant_id"] != client_id and user["role"] != "system_admin":
+        raise HTTPException(status_code=403, detail="Cannot manage members of another tenant")
+
+    with get_connection() as conn:
+        target = conn.execute("SELECT * FROM users WHERE id = ? AND tenant_id = ?", (user_id, client_id)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="Member not found in this tenant")
+
+        target_dict = dict(target)
+        if target_dict["role"] == "system_admin":
+            raise HTTPException(status_code=403, detail="System administrators cannot be reset via tenant member API")
+
+    try:
+        validate_password_policy(req.new_password, email=target_dict["email"])
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+
+    new_hash = hash_password(req.new_password)
+    now = now_utc_iso()
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE users SET password_hash = ?, must_change_password = 1, tokens_revoked_before = ? WHERE id = ? AND tenant_id = ?",
+            (new_hash, now, user_id, client_id),
+        )
+
+    revoke_all_user_tokens(user_id)
+
+    AuditLedger.append_event(
+        event_type="client_member_password_reset",
+        actor_id=user["id"],
+        tenant_id=client_id,
+        resource_id=user_id,
+        action="reset_member_password",
+        decision="permitted",
+        details={"target_email": target_dict["email"]},
+    )
+    return {"message": "Password reset successfully; user must change password on next login"}
+
 
 
 @app.post("/api/clients/{client_id}/documents", status_code=status.HTTP_201_CREATED)
@@ -779,10 +1040,14 @@ async def upload_document(
     throttle("upload", user["id"])
 
     content_type = request.headers.get("content-type", "")
+    creator_id = user["id"]
     if "multipart/form-data" in content_type:
         form = await request.form()
         title = form.get("title")
         file = form.get("file")
+        emp_attr = form.get("employee_id") or form.get("employee_name")
+        if emp_attr:
+            creator_id = str(emp_attr).strip()
         if not file:
             raise HTTPException(status_code=400, detail="File must be uploaded in form-data")
         content_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
@@ -794,12 +1059,15 @@ async def upload_document(
         filename = body.get("filename", "document.txt")
         content = body.get("content", "")
         content_bytes = content.encode("utf-8") if isinstance(content, str) else b""
+        emp_attr = body.get("employee_id") or body.get("employee_name")
+        if emp_attr:
+            creator_id = str(emp_attr).strip()
 
     if len(content_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"File exceeds the {MAX_UPLOAD_BYTES} byte upload limit")
     result = DocumentService.ingest_document(
         tenant_id=client_id,
-        user_id=user["id"],
+        user_id=creator_id,
         title=doc_title,
         filename=filename,
         content_bytes=content_bytes,
@@ -868,6 +1136,8 @@ async def replace_document_version(
 
 @app.get("/api/documents/{document_id}/transparency")
 def get_document_transparency_api(document_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    if user["role"] not in {"system_admin", "client_admin"}:
+        raise HTTPException(status_code=403, detail="Document transparency metrics and embedding telemetry are restricted to administrators")
     data = DocumentService.get_document_transparency(document_id, user["tenant_id"])
     if not data:
         raise HTTPException(status_code=404, detail="Document not found or unauthorized")
@@ -1251,7 +1521,20 @@ def verify_tee_attestation(req: TeeVerifyRequest, user: dict[str, Any] = Depends
 def get_nlp_stats(user: dict[str, Any] = Depends(get_current_user)):
     require_admin(user)
     from vector_store import InMemoryVectorDB
-    return InMemoryVectorDB.get_instance().get_status()
+    raw_status = InMemoryVectorDB.get_instance().get_status()
+    if user["role"] == "system_admin":
+        return raw_status
+
+    tenant = user["tenant_id"]
+    with get_connection() as conn:
+        chunk_cnt = conn.execute("SELECT COUNT(*) c FROM document_chunks WHERE tenant_id = ?", (tenant,)).fetchone()["c"]
+        doc_cnt = conn.execute("SELECT COUNT(*) c FROM documents WHERE tenant_id = ?", (tenant,)).fetchone()["c"]
+    status = dict(raw_status)
+    status["total_chunks"] = chunk_cnt
+    status["total_documents"] = doc_cnt
+    status["scoped_tenant_id"] = tenant
+    status["is_tenant_scoped"] = True
+    return status
 
 
 @app.post("/api/admin/vector-reindex")
@@ -1289,14 +1572,16 @@ def train_intent_beautification_api(user: dict[str, Any] = Depends(get_current_u
 def get_graph_stats(user: dict[str, Any] = Depends(get_current_user)):
     require_admin(user)
     from sop_graph import SOPKnowledgeGraph
-    return SOPKnowledgeGraph.get_instance().get_stats()
+    tenant = None if user["role"] == "system_admin" else user["tenant_id"]
+    return SOPKnowledgeGraph.get_instance().get_stats(tenant_id=tenant)
 
 
 @app.get("/api/admin/interaction-metrics")
 def get_interaction_metrics(user: dict[str, Any] = Depends(get_current_user)):
     require_admin(user)
     from session_tracker import SessionTracker
-    return SessionTracker.get_summary_metrics()
+    tenant = None if user["role"] == "system_admin" else user["tenant_id"]
+    return SessionTracker.get_summary_metrics(tenant_id=tenant)
 
 
 @app.get("/api/admin/security-matrix")

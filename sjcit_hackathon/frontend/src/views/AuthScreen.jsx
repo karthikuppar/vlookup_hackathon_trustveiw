@@ -5,6 +5,7 @@ import { api } from '../services/http'
 const DEMO_ACCOUNTS = [
   { name: 'Alice Admin', email: 'admin@acrocorp.com', role: 'Main Admin', dept: 'SOP Governance & Compliance' },
   { name: 'Edward Employee', email: 'employee@acrocorp.com', role: 'Employee', dept: 'Operations & Engineering' },
+  { name: 'Sam Employee', email: 'sam@acrocorp.com', role: 'Employee', dept: 'Retail Logistics & Returns' },
 ]
 
 export default function AuthScreen({ onLogin }) {
@@ -61,12 +62,12 @@ export default function AuthScreen({ onLogin }) {
     <div className="auth-wrapper">
       <div className="auth-box">
         <div style={{ textAlign: 'center', marginBottom: '1.5rem' }}>
-          <div className="brand-logo" style={{ margin: '0 auto 0.75rem', width: '48px', height: '48px', fontSize: '1.4rem' }}>
-            <Shield size={26} />
+          <div className="brand-logo" style={{ margin: '0 auto 0.75rem', width: '42px', height: '42px' }}>
+            <Shield size={22} />
           </div>
-          <h1 style={{ fontSize: '1.45rem', fontWeight: 800, color: '#fff' }}>AegisKB Console</h1>
-          <p style={{ fontSize: '0.84rem', color: '#94a3b8', marginTop: '0.25rem' }}>
-            Secure Multi-Client Knowledge Chatbot (PS-04)
+          <h1 style={{ fontSize: '1.35rem', fontWeight: 600, color: 'var(--accent-primary)' }}>AegisKB Enterprise</h1>
+          <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+            Document-Grounded Knowledge Management & Audit
           </p>
         </div>
 
@@ -79,7 +80,7 @@ export default function AuthScreen({ onLogin }) {
 
         {!isRegister && (
           <div style={{ marginBottom: '1.5rem' }}>
-            <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
               Instant Demo Logins:
             </span>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem', marginTop: '0.5rem' }}>
@@ -92,8 +93,8 @@ export default function AuthScreen({ onLogin }) {
                   disabled={loading}
                   aria-label={`Sign in as ${acc.name}, ${acc.role}`}
                 >
-                  <span><b>{acc.name}</b> <small style={{ color: '#94a3b8' }}>({acc.role})</small></span>
-                  <ChevronRight size={14} color="#818cf8" />
+                  <span><b>{acc.name}</b> <small style={{ color: 'var(--text-secondary)' }}>({acc.role})</small></span>
+                  <ChevronRight size={14} color="var(--accent-secondary)" />
                 </button>
               ))}
             </div>
@@ -110,22 +111,22 @@ export default function AuthScreen({ onLogin }) {
         >
           {isRegister && (
             <div>
-              <label htmlFor="reg-name" style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Full Name</label>
+              <label htmlFor="reg-name" style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Full Name</label>
               <input id="reg-name" required className="input-field" value={name} onChange={e => setName(e.target.value)} />
             </div>
           )}
           <div>
-            <label htmlFor="auth-email" style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Email Address</label>
+            <label htmlFor="auth-email" style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Email Address</label>
             <input id="auth-email" required type="email" className="input-field" value={email} onChange={e => setEmail(e.target.value)} placeholder="admin@acrocorp.com" />
           </div>
 
           <div>
-            <label htmlFor="auth-password" style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Password</label>
+            <label htmlFor="auth-password" style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Password</label>
             <input id="auth-password" required type="password" className="input-field" value={password} onChange={e => setPassword(e.target.value)} />
           </div>
 
           {isRegister && (
-            <p style={{ fontSize: '0.74rem', color: '#94a3b8' }}>
+            <p style={{ fontSize: '0.74rem', color: 'var(--text-secondary)' }}>
               New accounts are created with the Employee role. Registration may be disabled by your administrator.
             </p>
           )}

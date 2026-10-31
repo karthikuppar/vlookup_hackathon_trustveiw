@@ -44,8 +44,22 @@ def init_db():
             role TEXT NOT NULL, -- system_admin, client_admin, client_employee
             tenant_id TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            tokens_revoked_before TEXT,
+            must_change_password INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
         );
+
+        CREATE TABLE IF NOT EXISTS token_blacklist (
+            jti TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            token_type TEXT NOT NULL, -- access, refresh
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT NOT NULL,
+            reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_token_blacklist_user ON token_blacklist(user_id);
+
 
         CREATE TABLE IF NOT EXISTS documents (
             id TEXT PRIMARY KEY,
@@ -367,3 +381,13 @@ def init_db():
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(audit_events)").fetchall()}
         if "details_json" not in cols:
             conn.execute("ALTER TABLE audit_events ADD COLUMN details_json TEXT")
+
+        # Migration: ensure users table has lifecycle columns
+        user_cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "is_active" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+        if "tokens_revoked_before" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN tokens_revoked_before TEXT")
+        if "must_change_password" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+
